@@ -34,7 +34,7 @@ function saveSettings() {
 
 // ---------- 本体 ----------
 const mosaic = new Mosaic();
-const view = new View($('#view'), mosaic);
+const view = new View($('#view'), mosaic, () => settings.bgColor);
 const stitcher = new Stitcher(mosaic, settings);
 const store = new ProjectStore(mosaic);
 const mini = $('#mini');
@@ -524,6 +524,8 @@ function bindRange(id, out, key, fmt) {
   o.textContent = fmt(settings[key]);
   el.oninput = () => { settings[key] = parseFloat(el.value); o.textContent = fmt(settings[key]); saveSettings(); };
 }
+$('#setBgColor').value = settings.bgColor;
+$('#setBgColor').onchange = () => { settings.bgColor = $('#setBgColor').value; saveSettings(); view.redraw(); };
 bindRange('#setThr', '#outThr', 'threshold', (v) => v.toFixed(2));
 bindRange('#setStep', '#outStep', 'videoStep', (v) => v.toFixed(2) + ' 秒');
 bindRange('#setAdd', '#outAdd', 'addUncovered', (v) => Math.round(v * 100) + '%');

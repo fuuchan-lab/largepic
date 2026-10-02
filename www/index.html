@@ -181,6 +181,13 @@
 
 <dialog id="dlgSettings">
   <h2>設定</h2>
+  <label>背景色
+    <select id="setBgColor">
+      <option value="black">黒（デフォルト）</option>
+      <option value="gray">グレー</option>
+      <option value="white">白</option>
+    </select>
+  </label>
   <label>位置合わせの厳しさ <output id="outThr"></output>
     <input type="range" id="setThr" min="0.3" max="0.9" step="0.05">
     <small>低いと合わせやすいが、間違った場所に付くことも。</small>

@@ -47,9 +47,10 @@ export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region,
 }
 
 export class View {
-  constructor(canvas, mosaic) {
+  constructor(canvas, mosaic, getBgColor = () => 'black') {
     this.canvas = canvas;
     this.mosaic = mosaic;
+    this.getBgColor = getBgColor;
     this.scale = 0.3;    // CSS px / モザイク px
     this.ox = 0; this.oy = 0;   // 画面左上のモザイク座標
     this.mode = 'pan';   // 'pan' | 'adjust'
@@ -64,6 +65,8 @@ export class View {
     this._bind();
     new ResizeObserver(() => this.resize()).observe(canvas);
   }
+
+  redraw() { this.draw(); }
 
   resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -124,7 +127,7 @@ export class View {
 
     const bb = mosaic.bbox();
     if (bb) {
-      ctx.fillStyle = hatchPattern(ctx);
+      ctx.fillStyle = getBgFill(ctx, this.getBgColor());
       ctx.fillRect(sx(bb.x), sy(bb.y), bb.w * s, bb.h * s);
     }
     ctx.imageSmoothingQuality = 'high';
