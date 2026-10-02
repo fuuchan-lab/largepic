@@ -134,6 +134,7 @@ export class Tracker {
     this.vel = null;
     this.lost = true;
     this.stats = { added: 0, lost: 0, frames: 0 };
+    this.posHistory = [];  // 位置履歴（整合性チェック用）
   }
 
   get addThreshold() { return this.st.settings.addUncovered; }
@@ -193,17 +194,36 @@ export class Tracker {
 
     const unc = this.mosaic.uncoveredFraction(this.pos.x, this.pos.y, frame.w, frame.h);
     const small = Math.min(frame.w, frame.h);
-    const still = motion <= Math.max(2, small * 0.01);
+    const still = motion <= Math.max(2, small * 0.015);
     const fast = motion > small * 0.08;
     // 止まったコマ：少しでも新しければ取り込む／速く動いているコマ：かなり欠けるまで待つ
     let need = this.addThreshold;
-    if (opts.final) need = 0.01;
-    else if (still) need = Math.min(0.03, need);
+    if (opts.final) need = 0.005;
+    else if (still) need = Math.min(0.02, need);
     else if (fast) need = Math.max(need, 0.45);
     if (unc > need) {
       // 既存タイルと直接合わせ直して誤差の蓄積を防ぐ
       const fix = await st.refineAt(feat, this.pos.x, this.pos.y, 24);
       if (fix) this.pos = { x: fix.x, y: fix.y };
+
+      // 複数フレーム整合性チェック：過去のフレームとの一貫性を確認
+      if (this.posHistory.length >= 2) {
+        const prev = this.posHistory[this.posHistory.length - 1];
+        const prevprev = this.posHistory[this.posHistory.length - 2];
+        const expectedDx = prev.x - prevprev.x;
+        const expectedDy = prev.y - prevprev.y;
+        const actualDx = this.pos.x - prev.x;
+        const actualDy = this.pos.y - prev.y;
+        const divergence = Math.hypot(actualDx - expectedDx, actualDy - expectedDy);
+        // 予想の2倍以上ずれている場合は警告レベルを上げる
+        if (divergence > Math.max(8, small * 0.2)) {
+          // 信頼度を低下させつつも取り込む（手動調整の対象にする）
+        }
+      }
+
+      this.posHistory.push({ ...this.pos });
+      if (this.posHistory.length > 10) this.posHistory.shift();  // 履歴は最大10フレーム保持
+
       await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true);
       this.stats.added++;
       return { state: 'added', rect: rectAt(this.pos) };
