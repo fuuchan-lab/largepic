@@ -122,6 +122,23 @@ function coarseSpectrum(f, nx, ny) {
   return f._fft;
 }
 
+// エッジ検出（Sobel）で平坦度を計算
+function computeEdgeDensity(data, w, h, x0, y0, x1, y1, stride) {
+  let edges = 0, count = 0;
+  for (let y = Math.max(1, y0); y < Math.min(h - 1, y1); y += stride) {
+    for (let x = Math.max(1, x0); x < Math.min(w - 1, x1); x += stride) {
+      const o = y * w + x;
+      const gx = Math.abs(data[o - w - 1] + 2 * data[o - 1] + data[o + w - 1]
+                        - data[o - w + 1] - 2 * data[o + 1] - data[o + w + 1]);
+      const gy = Math.abs(data[o - w - 1] + 2 * data[o - w] + data[o - w + 1]
+                        - data[o + w - 1] - 2 * data[o + w] - data[o + w + 1]);
+      if (gx + gy > 50) edges++;
+      count++;
+    }
+  }
+  return count > 0 ? edges / count : 0;
+}
+
 // ---------- NCC ----------
 // b を a 座標の (dx,dy) に置いたときの重なり部分の正規化相互相関
 export function ncc(A, B, dx, dy, stride = 1) {
@@ -141,9 +158,14 @@ export function ncc(A, B, dx, dy, stride = 1) {
   const overlap = ((x1 - x0) * (y1 - y0)) / Math.min(A.w * A.h, B.w * B.h);
   const va = saa - sa * sa / n, vb = sbb - sb * sb / n;
   if (va <= 1e-6 * n || vb <= 1e-6 * n) return { score: 0, overlap };
-  // 平坦（情報が少ない）な重なりは信頼度を下げる
-  const flat = Math.min(1, Math.sqrt(Math.min(va, vb) / n) / 4);
-  return { score: ((sab - sa * sb / n) / Math.sqrt(va * vb)) * flat, overlap };
+
+  // 平坦性チェック改善：エッジ密度を考慮
+  let flatScore = Math.min(1, Math.sqrt(Math.min(va, vb) / n) / 2.5);
+  const edgeA = computeEdgeDensity(a, A.w, A.h, x0, y0, x1, y1, stride);
+  const edgeB = computeEdgeDensity(b, B.w, B.h, x0 - dx, y0 - dy, x1 - dx, y1 - dy, stride);
+  if (edgeA > 0.05 || edgeB > 0.05) flatScore = Math.min(1, flatScore + 0.3);
+
+  return { score: ((sab - sa * sb / n) / Math.sqrt(va * vb)) * flatScore, overlap };
 }
 
 function strideFor(area) {
