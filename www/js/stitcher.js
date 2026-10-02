@@ -24,7 +24,7 @@ export class Stitcher {
   async makeTile(frame, feat, srcBlob, x, y, placed) {
     let src = srcBlob, sx = frame.rect.sx, sy = frame.rect.sy;
     if (!src) {
-      src = await canvasToBlob(frame.canvas, 'image/jpeg', 0.95);
+      src = await canvasToBlob(frame.canvas, 'image/png', 1);
       sx = 0; sy = 0;
     }
     const { bmp, scale } = await makeThumb(frame.canvas, frame.w, frame.h, this.settings.thumbSize);
