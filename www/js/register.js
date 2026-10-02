@@ -186,18 +186,19 @@ function searchLocal(A, B, cx, cy, r, minOverlap, stride, step = 1) {
 }
 
 // 粗い解像度の (dx,dy) を高解像度まで詰める
-function refine(a, b, cdx, cdy, minOverlap) {
+function refine(a, b, cdx, cdy, minOverlap, fastScroll = false) {
   // mid
   const rm = a.mid.scale / a.coarse.scale;
+  const midRadius = Math.ceil(rm) + (fastScroll ? 2 : 1);
   let best = searchLocal(a.mid, b.mid, Math.round(cdx * rm), Math.round(cdy * rm),
-    Math.ceil(rm) + 1, minOverlap * 0.8, 0, 2);
+    midRadius, minOverlap * 0.8, 0, 2);
   if (!best) return null;
-  best = searchLocal(a.mid, b.mid, best.dx, best.dy, 1, minOverlap * 0.8) || best;
+  best = searchLocal(a.mid, b.mid, best.dx, best.dy, 2, minOverlap * 0.8) || best;
   // full
   if (a.full && b.full && a.mid.scale < 1) {
     const rf = 1 / a.mid.scale;
     const cx = Math.round(best.dx * rf), cy = Math.round(best.dy * rf);
-    const r = Math.ceil(rf) + 1;
+    const r = Math.ceil(rf) + (fastScroll ? 3 : 1);
     const big = Math.min(a.w * a.h, b.w * b.h);
     const s1 = big > 1500000 ? 4 : big > 400000 ? 3 : 2;
     let fb = searchLocal(a.full, b.full, cx, cy, r, minOverlap * 0.7, s1, 2);
@@ -266,13 +267,13 @@ export function coarseMatch(a, b, opts = {}) {
 }
 
 // a に対する b の位置 (dx,dy) を推定する
-// opts: { minOverlap, hint:{dx,dy} (フル解像度), candidates }
+// opts: { minOverlap, hint:{dx,dy} (フル解像度), candidates, fastScroll }
 export function register(a, b, opts = {}) {
   const minOverlap = opts.minOverlap ?? 0.08;
   const scored = coarseCandidates(a, b, opts);
   let best = null;
   for (const c of scored.slice(0, 3)) {
-    const r = refine(a, b, c.dx, c.dy, minOverlap);
+    const r = refine(a, b, c.dx, c.dy, minOverlap, opts.fastScroll);
     if (r && (!best || r.score > best.score)) best = r;
     if (best && best.score > 0.85) break;
   }

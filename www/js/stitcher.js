@@ -167,7 +167,9 @@ export class Tracker {
 
     let motion = Infinity;
     if (!this.lost && this.ref) {
-      const r = register(this.ref, feat, { hint: this.vel || undefined });
+      const small = Math.min(frame.w, frame.h);
+      const fastScroll = this.vel && Math.hypot(this.vel.dx, this.vel.dy) > small * 0.1;
+      const r = register(this.ref, feat, { hint: this.vel || undefined, fastScroll });
       if (r && r.score >= st.threshold) {
         motion = Math.hypot(r.dx, r.dy);
         this.vel = { dx: r.dx, dy: r.dy };
