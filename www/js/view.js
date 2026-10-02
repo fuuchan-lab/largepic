@@ -1,26 +1,13 @@
 // モザイクの表示と、指・マウスでの操作（パン／ピンチ／タイルのドラッグ）
 
-let hatch = null;
-function hatchPattern(ctx) {
-  if (hatch) return ctx.createPattern(hatch, 'repeat');
-  hatch = document.createElement('canvas');
-  hatch.width = hatch.height = 14;
-  const h = hatch.getContext('2d');
-  h.fillStyle = 'rgba(255,80,80,0.18)';
-  h.fillRect(0, 0, 14, 14);
-  h.strokeStyle = 'rgba(255,80,80,0.55)';
-  h.lineWidth = 2;
-  h.beginPath();
-  h.moveTo(-2, 16); h.lineTo(16, -2);
-  h.moveTo(-2, 2); h.lineTo(2, -2);
-  h.moveTo(12, 16); h.lineTo(16, 12);
-  h.stroke();
-  return ctx.createPattern(hatch, 'repeat');
+const bgColors = { black: '#000', gray: '#333', white: '#f5f5f5' };
+function getBgFill(ctx, bgColor = 'black') {
+  return bgColors[bgColor] || bgColors.black;
 }
 
 // 全体図（ミニマップ・別窓用）
 // region を渡すとその範囲を表示する。戻り値は表示変換 { s, ox, oy }
-export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region } = {}) {
+export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region, bgColor } = {}) {
   const dpr = window.devicePixelRatio || 1;
   const cw = canvas.clientWidth || canvas.width / dpr, ch = canvas.clientHeight || canvas.height / dpr;
   if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
@@ -28,7 +15,7 @@ export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region 
   }
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#111418';
+  ctx.fillStyle = getBgFill(ctx, bgColor);
   ctx.fillRect(0, 0, cw, ch);
   let bb = region || mosaic.bbox(true);
   if (!bb) return null;
@@ -41,10 +28,6 @@ export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region 
   const s = Math.min((cw - pad * 2) / bb.w, (ch - pad * 2) / bb.h);
   const ox = (cw - bb.w * s) / 2 - bb.x * s, oy = (ch - bb.h * s) / 2 - bb.y * s;
   const pb = mosaic.bbox();
-  if (pb) {
-    ctx.fillStyle = hatchPattern(ctx);
-    ctx.fillRect(ox + pb.x * s, oy + pb.y * s, pb.w * s, pb.h * s);
-  }
   for (const t of mosaic.tiles) {
     ctx.drawImage(t.thumb, ox + t.x * s, oy + t.y * s, t.w * s, t.h * s);
     if (!t.placed) {

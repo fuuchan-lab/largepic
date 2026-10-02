@@ -16,6 +16,7 @@ const DEFAULTS = {
   videoStep: 0.15,
   addUncovered: 0.2,
   thumbSize: 640,
+  bgColor: 'black',
   crops: { image: PRESETS.phone, video: PRESETS.phone, live: PRESETS.desktop },
 };
 function loadSettings() {
