@@ -173,6 +173,9 @@ export class Tracker {
     this.stats = { added: 0, lost: 0, frames: 0 };
     this.posHistory = [];  // 位置履歴（整合性チェック用）
     this.ignoreConflicts = 0;
+    this.lostRun = 0;        // 連続して位置を見失った回数
+    this.everTracked = false; // この取り込みで一度でも位置をつかめたか
+    this.lostIgnore = 0;     // 「続ける」を選んだあと、しばらく警告しないための残り回数
     this.tf = { hits: 0, last: null, lostFrames: 0 };  // 回転・拡大率の変化の検出状況
   }
 
@@ -204,7 +207,15 @@ export class Tracker {
   get addThreshold() { return this.st.settings.addUncovered; }
 
   // opts.final: 最後のフレーム（少しでも未取得部分があれば取り込む）
+  // 呼び出し側から使うラッパー：つながらなくなった状況（連続して見失った回数）を数える
   async process(frame, opts = {}) {
+    const r = await this._process(frame, opts);
+    if (r.state === 'lost') this.lostRun++;
+    else if (r.state === 'tracking' || r.state === 'added') { this.lostRun = 0; this.everTracked = true; }
+    return r;
+  }
+
+  async _process(frame, opts = {}) {
     const st = this.st;
     const feat = st.features(frame);
     const rectAt = (p) => (p ? { x: p.x, y: p.y, w: frame.w, h: frame.h } : null);

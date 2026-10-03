@@ -296,10 +296,23 @@
   <div class="col">
     <button id="cfUndo3" class="primary">直前の3枚を取り消して終了</button>
     <button id="cfUndoAll">この取り込み分をすべて取り消して終了</button>
+    <button id="cfBackSave">一つ前に戻して保存へ</button>
     <button id="cfKeep">ここまでを残して終了</button>
     <button id="cfIgnore">無視して続ける</button>
   </div>
   <p class="sub small">あとから［↶ 戻す］で、1枚ずつ・5枚ずつ・取り込み単位で取り消せます。</p>
+</dialog>
+
+<dialog id="dlgLost">
+  <h2>画像がつながらなくなりました</h2>
+  <p id="lsBody" class="sub"></p>
+  <div class="col">
+    <button id="lsBack" class="primary">一つ前に戻して保存へ</button>
+    <button id="lsSave">ここまでを残して保存へ</button>
+    <button id="lsContinue">続ける（探し直す）</button>
+    <button id="lsUndo">この取り込み分を取り消して終了</button>
+  </div>
+  <p class="sub small">取り込み済みの場所が映るまで戻ってから、［続ける］で再開することもできます。</p>
 </dialog>
 
 <dialog id="dlgUndo">

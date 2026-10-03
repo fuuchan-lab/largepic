@@ -163,4 +163,17 @@ for (;;) {
 }
 const n4 = await tiles();
 check(ignored >= 1 && n4 >= 6, `「無視して続ける」で最後まで取り込める (無視 ${ignored}回, ${n4}枚)`);
+// 5) 矛盾のダイアログからも「一つ前に戻して保存へ」
+await page.evaluate(() => { window.largepic.mosaic.clear(); window.largepic.settings.conflictBelow = 1.01; });
+await page.setInputFiles('#fileVideo', vidC);
+await page.waitForSelector('#dlgCrop[open]', { timeout: 20000 });
+await page.click('#dlgCrop [data-ok]');
+await waitConflict();
+// 先に何枚か取り込ませるため、最初の矛盾は無視してから、次の矛盾で戻す
+await page.click('#cfIgnore');
+await waitConflict();
+const b1 = await tiles();
+await page.click('#cfBackSave');
+await page.waitForSelector('#dlgExport[open]', { timeout: 30000 });
+check((await tiles()) === b1 - 1 && b1 >= 2, `矛盾のダイアログから「一つ前に戻して保存へ」 (${b1} → ${await tiles()}枚)`);
 await browser.close(); server.close(); process.exit(fail?1:0);

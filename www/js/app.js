@@ -12,7 +12,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.5';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.6';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -148,18 +148,61 @@ function resolveConflict(r, where, batch) {
     $('#cfUndoAll').disabled = mine < 1;
     $('#cfUndoAll').textContent = `この取り込み分（${mine}枚）をすべて取り消して終了`;
     const done = (act) => {
-      for (const id of ['cfUndo3', 'cfUndoAll', 'cfKeep', 'cfIgnore']) $('#' + id).onclick = null;
+      for (const id of ['cfUndo3', 'cfUndoAll', 'cfBackSave', 'cfKeep', 'cfIgnore']) $('#' + id).onclick = null;
       dlg.oncancel = null;
       dlg.close();
       resolve(act);
     };
     $('#cfUndo3').onclick = () => { const n = mosaic.removeLast(Math.min(3, mine)); toast(`直前の${n}枚を取り消しました`); done('stop'); };
     $('#cfUndoAll').onclick = () => { for (const t of mosaic.batchTiles(batch)) mosaic.remove(t); toast('この取り込み分を取り消しました'); done('stop'); };
+    $('#cfBackSave').disabled = mine < 1;
+    $('#cfBackSave').onclick = () => { mosaic.removeLast(1); pendingExport = true; done('stop'); };
     $('#cfKeep').onclick = () => done('stop');
     $('#cfIgnore').onclick = () => done('continue');
     dlg.oncancel = (e) => { e.preventDefault(); };
     dlg.showModal();
   });
+}
+
+// つながらなくなった（位置を見失い続けた）とき。選んだ操作をして 'stop' か 'continue' を返す
+function resolveLost(where, batch) {
+  importLog.events.push({ type: 'lost', where });
+  return new Promise((resolve) => {
+    const dlg = $('#dlgLost');
+    const mine = mosaic.batchTiles(batch).length;
+    $('#lsBody').textContent = `${where}で、すでに取り込んだ部分と画像がつながらなくなったので止めました。`
+      + '無理に続けると、ずれた画像が増えるおそれがあります。';
+    $('#lsBack').disabled = mine < 1;
+    $('#lsUndo').disabled = mine < 1;
+    $('#lsUndo').textContent = `この取り込み分（${mine}枚）を取り消して終了`;
+    const done = (act) => {
+      for (const id of ['lsBack', 'lsSave', 'lsContinue', 'lsUndo']) $('#' + id).onclick = null;
+      dlg.oncancel = null;
+      dlg.close();
+      resolve(act);
+    };
+    $('#lsBack').onclick = () => { mosaic.removeLast(1); pendingExport = true; toast('一つ前に戻しました'); done('stop'); };
+    $('#lsSave').onclick = () => { pendingExport = true; done('stop'); };
+    $('#lsContinue').onclick = () => done('continue');
+    $('#lsUndo').onclick = () => { for (const t of mosaic.batchTiles(batch)) mosaic.remove(t); toast('この取り込み分を取り消しました'); done('stop'); };
+    dlg.oncancel = (e) => { e.preventDefault(); };
+    dlg.showModal();
+  });
+}
+// 取り込みを止めたあと、保存の画面を開く（止めるとき「保存へ」を選んだ場合）
+let pendingExport = false;
+function openExportIfPending() {
+  if (!pendingExport) return;
+  pendingExport = false;
+  setTimeout(() => { if (!busy && mosaic.tiles.length) $('#btnExport').click(); }, 150);
+}
+const LOST_LIMIT = { key: 2, all: 6, live: 25 };   // 連続して見失ったら止める回数
+function shouldStopLost(tracker, r, limit) {
+  if (r.state !== 'lost') return false;
+  if (tracker.lostIgnore > 0) { tracker.lostIgnore--; return false; }
+  // 回転・拡大率の変化を疑っている間は、その判定（警告）を優先して少し待つ
+  if (tracker.tf.hits > 0 && tracker.lostRun < limit + 2) return false;
+  return tracker.everTracked && tracker.lostRun >= limit;
 }
 
 async function askCrop(kind, source, sw, sh, opts) {
@@ -297,6 +340,10 @@ async function addVideo(file) {
         const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
         const r = await tracker.process(frame, { hint, kpos: { x: k.x, y: k.y }, vt: k.t, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
         if (r.state === 'transform') { stopped = { r, t: k.t }; break; }
+        if (shouldStopLost(tracker, r, LOST_LIMIT.key)) {
+          const act = await resolveLost(`動画の ${(k.t - start).toFixed(1)} 秒付近`, batch);
+          if (act === 'continue') { tracker.lostRun = 0; tracker.lostIgnore = 6; } else { stopped = { conflict: true }; break; }
+        }
         if (r.state === 'conflict') {
           const act = await resolveConflict(r, `動画の ${(k.t - start).toFixed(1)} 秒付近`, batch);
           if (act === 'continue') { tracker.ignoreConflicts = 4; } else { stopped = { conflict: true }; break; }
@@ -321,6 +368,10 @@ async function addVideo(file) {
         const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
         const r = await tracker.process(frame, { final: i === times.length - 1 });
         if (r.state === 'transform') { stopped = { r, t }; break; }
+        if (shouldStopLost(tracker, r, LOST_LIMIT.all)) {
+          const act = await resolveLost(`動画の ${(t - start).toFixed(1)} 秒付近`, batch);
+          if (act === 'continue') { tracker.lostRun = 0; tracker.lostIgnore = 12; } else { stopped = { conflict: true }; break; }
+        }
         if (r.state === 'conflict') {
           const act = await resolveConflict(r, `動画の ${(t - start).toFixed(1)} 秒付近`, batch);
           if (act === 'continue') { tracker.ignoreConflicts = 4; } else { stopped = { conflict: true }; break; }
@@ -340,7 +391,7 @@ async function addVideo(file) {
     console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
     Object.assign(importLog, { method: keys ? 'keyframes' : 'allframes', stats: tracker.stats, ms: Date.now() - t0Import, stopped: stopped ? (stopped.conflict ? 'conflict' : 'transform') : null });
     if (stopped?.conflict) {
-      toast('矛盾が見つかったので取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
+      if (!pendingExport) toast('取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
     } else if (stopped) {
       pendingWarn = [stopped.r, `動画の ${(stopped.t - start).toFixed(1)} 秒付近`,
         added ? `ここまでの${added}枚は取り込み済みです。` : ''];
@@ -362,6 +413,7 @@ async function addVideo(file) {
     URL.revokeObjectURL(url);
     liveRect = null;
     setBusy(false);
+    openExportIfPending();
   }
 }
 
@@ -514,7 +566,16 @@ async function liveLoop() {
           setLiveState('lost', '停止中：絵が食い違いました');
           const act = await resolveConflict(r, 'ライブ取り込み中', live.batch);
           if (act === 'continue') { live.tracker.ignoreConflicts = 4; live.paused = false; $('#btnLivePause').textContent = '一時停止'; live.tracker.lost = true; }
-          else { stopLive(); }
+          else { await stopLive(); openExportIfPending(); }
+          continue;
+        }
+        if (shouldStopLost(live.tracker, r, LOST_LIMIT.live)) {
+          live.paused = true;
+          $('#btnLivePause').textContent = '再開';
+          setLiveState('lost', '停止中：画像がつながらなくなりました');
+          const act = await resolveLost('ライブ取り込み中', live.batch);
+          if (act === 'continue') { live.tracker.lostRun = 0; live.tracker.lostIgnore = 30; live.paused = false; $('#btnLivePause').textContent = '一時停止'; live.tracker.lost = true; }
+          else { await stopLive(); openExportIfPending(); }
           continue;
         }
         liveRect = r.rect; liveLost = r.state === 'lost';

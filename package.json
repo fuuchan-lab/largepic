@@ -7,7 +7,7 @@
   "scripts": {
     "start": "npx http-server www -p 8000 -c-1",
     "test": "node test/register.test.mjs && node test/transform.test.mjs",
-    "test:e2e": "node test/e2e.mjs && node test/e2e-broken-store.mjs && node test/e2e-transform.mjs && node test/e2e-holes.mjs && node test/e2e-viewer.mjs && node test/e2e-sparse.mjs && node test/e2e-conflict.mjs && node test/e2e-tiles.mjs",
+    "test:e2e": "node test/e2e.mjs && node test/e2e-broken-store.mjs && node test/e2e-transform.mjs && node test/e2e-holes.mjs && node test/e2e-viewer.mjs && node test/e2e-sparse.mjs && node test/e2e-conflict.mjs && node test/e2e-tiles.mjs && node test/e2e-lost.mjs",
     "icons": "node resources/render-icons.mjs",
     "sync": "npx cap sync",
     "android": "npx cap sync android && npx cap open android",
