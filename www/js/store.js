@@ -63,7 +63,7 @@ export class ProjectStore {
     const meta = {
       version: 1,
       nextId: this.mosaic.nextId,
-      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, ix: t.ix, iy: t.iy, iw: t.iw, ih: t.ih, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, masks: t.masks || null })),
+      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, ix: t.ix, iy: t.iy, iw: t.iw, ih: t.ih, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, masks: t.masks || null, links: t.links || null })),
     };
     const add = tiles.filter((t) => !this.saved.has(t.id));
     const del = [...this.saved].filter((id) => !ids.has(id));

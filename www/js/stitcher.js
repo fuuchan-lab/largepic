@@ -1,4 +1,5 @@
 // 新しい画像（フレーム）をモザイクのどこに置くかを決める
+import { linkWeight, dropLinks } from './optimize.js';
 import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, ncc, scalesFor } from './register.js';
 import { makeThumb, canvasToBlob, nextFrame, newCanvas } from './imageutil.js';
 import { perf } from './perf.js';
@@ -123,6 +124,7 @@ export class Stitcher {
       .sort((p, q) => q.a - p.a)
       .slice(0, 3);
     let best = null;
+    const links = [];
     for (const { t } of others) {
       await this.mosaic.ensureFullGray(t);
       let r = registerNear(t.feat, feat, x - t.x, y - t.y, radius);
@@ -133,10 +135,12 @@ export class Stitcher {
         const base = ncc(t.feat[lv], feat[lv], Math.round((x - t.x) * t.feat[lv].scale), Math.round((y - t.y) * t.feat[lv].scale), lv === 'full' ? 3 : 1);
         if (base.score > 0 && r.score - base.score < 0.03) r = { dx: x - t.x, dy: y - t.y, score: Math.max(base.score, r.score - 0.03) };
       }
+      if (r && r.score >= this.threshold * 0.9) links.push({ id: t.id, dx: r.dx, dy: r.dy, w: linkWeight(r.score, t.weak) });
       if (r && r.score >= this.threshold * 0.9 && (!best || r.score > best.score)) {
         best = { x: t.x + r.dx, y: t.y + r.dy, score: r.score };
       }
     }
+    if (best) best.links = links;   // 全体の位置の最適化に使う（optimize.js）
     return best;
   }
 
@@ -166,6 +170,8 @@ export class Stitcher {
     const hit = await this.refineAt(tile.feat, tile.x, tile.y, radius, tile);
     if (!hit) return false;
     tile.x = hit.x; tile.y = hit.y; tile.placed = true;
+    dropLinks(this.mosaic, tile);
+    if (hit.links?.length) tile.links = hit.links;
     this.mosaic.changed();
     return true;
   }
@@ -177,6 +183,7 @@ export class Stitcher {
     const hit = await this.locate(tile.feat, order);
     if (!hit) return false;
     tile.x = hit.x; tile.y = hit.y; tile.placed = true;
+    dropLinks(this.mosaic, tile);
     this.mosaic.changed();
     return true;
   }
@@ -407,6 +414,7 @@ export class Tracker {
       const region = this.mosaic.newRegion(this.pos.x, this.pos.y, frame.w, frame.h, frame.masks);
       const tile = await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true, region);
       tile.conf = conf;
+      if (fix && fix.links.length) tile.links = fix.links;
       tile.vt = opts.vt;  // 動画の時刻（デバッグ用）
       tile.weak = conf < 0.7 || !fix && this.mosaic.placed().length > 1 && unc < 0.9; // 既存タイルで確かめられなかった
       if (tile.weak) this.stats.weak = (this.stats.weak || 0) + 1;

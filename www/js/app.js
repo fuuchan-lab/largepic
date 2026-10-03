@@ -9,6 +9,7 @@ import { keepAwake, sleep } from './awake.js';
 import { jobs } from './jobs.js';
 import { perf } from './perf.js';
 import { normalizeMasks } from './mask.js';
+import { optimizePositions, dropLinks, linkResidual } from './optimize.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -17,7 +18,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.12';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.13';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -420,11 +421,14 @@ async function addVideo(file, resume = null) {
       }
     }
     liveRect = null;
+    // 全体の位置を最適化：測定済みの相対位置に一番よく合うよう、ずれの蓄積を全体に分散する
+    const opt = optimizePositions(mosaic);
+    if (opt.applied) lastOpt = opt;
     view.fit();
     const { added, lost } = tracker.stats;
     console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
     importLog.perf = perf.report();
-    Object.assign(importLog, { method: keys ? 'keyframes' : 'allframes', stats: tracker.stats, ms: Date.now() - t0Import, stopped: stopped ? (stopped.conflict ? 'conflict' : 'transform') : null });
+    Object.assign(importLog, { optimize: { n: opt.n, before: +opt.before.rms.toFixed(2), after: +opt.after.rms.toFixed(2), moved: opt.moved, applied: opt.applied }, method: keys ? 'keyframes' : 'allframes', stats: tracker.stats, ms: Date.now() - t0Import, stopped: stopped ? (stopped.conflict ? 'conflict' : 'transform') : null });
     if (stopped?.conflict) {
       if (!pendingExport) toast('取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
     } else if (stopped) {
@@ -710,7 +714,7 @@ view.onTileMoved = async (tile) => {
   try {
     const ok = await stitcher.snap(tile);
     if (ok) toast('ピタッと合わせました');
-    else { tile.placed = true; mosaic.changed(); toast('合う場所が見つからないので、その位置に置きました'); }
+    else { tile.placed = true; dropLinks(mosaic, tile); mosaic.changed(); toast('合う場所が見つからないので、その位置に置きました'); }
   } finally { setBusy(false); }
 };
 $('#btnSnap').onclick = async () => {
@@ -727,6 +731,17 @@ $('#btnAuto').onclick = async () => {
   toast('探しています…', 10000);
   try { toast((await stitcher.autoPlace(t)) ? '合う場所に移動しました' : '合う場所が見つかりませんでした'); }
   finally { setBusy(false); }
+};
+let lastOpt = null;
+$('#btnOptimize').onclick = () => {
+  if (busy) return;
+  if (lastOpt?.undo && $('#btnOptimize').dataset.undo) { lastOpt.undo(); lastOpt = null; delete $('#btnOptimize').dataset.undo; $('#btnOptimize').textContent = '全体を最適化'; return toast('最適化を取り消しました'); }
+  const r = optimizePositions(mosaic, { minGain: 0.05 });
+  if (!r.n) return toast('最適化に使える位置の測定がありません（この機能の導入前に取り込んだ画像など）', 6000);
+  if (!r.applied) return toast(`これ以上よくなりません（測定${r.n}件・食い違い平均 ${r.before.rms.toFixed(1)}px）`, 5000);
+  lastOpt = r;
+  $('#btnOptimize').dataset.undo = '1'; $('#btnOptimize').textContent = '最適化を取り消す';
+  toast(`${r.moved}枚の位置を直しました（食い違い ${r.before.rms.toFixed(1)}px → ${r.after.rms.toFixed(1)}px）`, 6000);
 };
 $('#btnFront').onclick = () => { if (view.selected) mosaic.bringToFront(view.selected); };
 $('#btnDelete').onclick = () => {
@@ -1170,4 +1185,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:' && !isNative)
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 // テスト・デバッグ用
-window.largepic = { mosaic, view, stitcher, settings, store, trim, computeTrim, viewer, importLog, diagnostics };
+window.largepic = { optimizePositions, linkResidual, mosaic, view, stitcher, settings, store, trim, computeTrim, viewer, importLog, diagnostics };
