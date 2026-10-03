@@ -1,5 +1,5 @@
 // 新しい画像（フレーム）をモザイクのどこに置くかを決める
-import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, scalesFor } from './register.js';
+import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, ncc, scalesFor } from './register.js';
 import { makeThumb, canvasToBlob, nextFrame } from './imageutil.js';
 
 const overlapArea = (a, b) =>
@@ -52,7 +52,7 @@ export class Stitcher {
     for (const t of order) {
       await this.mosaic.ensureFullGray(t);
       const r = register(t.feat, feat);
-      if (r && r.score >= this.threshold && (!best || r.score > best.score)) {
+      if (r && r.score >= this.threshold && r.overlap >= 0.12 && (!best || r.score > best.score)) {
         best = { x: t.x + r.dx, y: t.y + r.dy, score: r.score, tile: t };
         if (r.score > 0.85) break;
       }
@@ -83,7 +83,14 @@ export class Stitcher {
     let best = null;
     for (const { t } of others) {
       await this.mosaic.ensureFullGray(t);
-      const r = registerNear(t.feat, feat, x - t.x, y - t.y, radius);
+      let r = registerNear(t.feat, feat, x - t.x, y - t.y, radius);
+      if (r && r.score >= this.threshold * 0.9 && (r.dx !== x - t.x || r.dy !== y - t.y)) {
+        // 今の位置とほとんど変わらない程度の改善なら、位置を動かさない
+        // （海のように模様が少ない所では、探すほど偶然よい点が見つかって位置が飛ぶため）
+        const lv = (t.feat.full && feat.full) ? 'full' : 'mid';
+        const base = ncc(t.feat[lv], feat[lv], Math.round((x - t.x) * t.feat[lv].scale), Math.round((y - t.y) * t.feat[lv].scale), lv === 'full' ? 3 : 1);
+        if (base.score > 0 && r.score - base.score < 0.03) r = { dx: x - t.x, dy: y - t.y, score: Math.max(base.score, r.score - 0.03) };
+      }
       if (r && r.score >= this.threshold * 0.9 && (!best || r.score > best.score)) {
         best = { x: t.x + r.dx, y: t.y + r.dy, score: r.score };
       }
@@ -152,7 +159,16 @@ export class Tracker {
   checkTransform(ref, feat) {
     let d = null;
     try { d = diagnoseTransform(ref, feat); } catch (e) { console.warn(e); }
-    if (d) { this.tf.hits++; this.tf.last = d; } 
+    if (d && feat === this.tf.lastFeat) return this.tf.hits >= 2;  // 同じコマの別の相手との照合は1回と数える
+    if (d) {
+      this.tf.lastFeat = feat;
+      // 別々のコマで2回続けて「同じ回転・拡大率」が見つかったときだけ本物とみなす（偶然の一致で止めない）
+      const l = this.tf.last;
+      const same = l && Math.abs(Math.abs(d.angle) - Math.abs(l.angle)) < 6
+        && Math.abs(Math.log(d.scale) - Math.log(l.scale)) < 0.08;
+      this.tf.hits = same ? this.tf.hits + 1 : 1;
+      this.tf.last = d;
+    }
     return this.tf.hits >= 2;
   }
 
@@ -186,20 +202,30 @@ export class Tracker {
       if (!(opts.final || opts.immediate || opts.key || (this.chain >= 2 && this.chainMove > small * 0.03))) {
         return { state: 'waiting', rect: null };
       }
-      await st.makeTile(frame, feat, null, 0, 0, true);
+      const t0 = await st.makeTile(frame, feat, null, 0, 0, true);
+      t0.vt = opts.vt;
+      if (opts.kpos) this.kAnchor = { kx: opts.kpos.x, ky: opts.kpos.y, px: 0, py: 0 };
       this.ref = feat; this.pos = { x: 0, y: 0 }; this.lost = false; this.vel = null; this.cand = null;
       this.stats.added++;
       return { state: 'added', rect: rectAt(this.pos) };
     }
 
-    if (opts.newSeg) { this.lost = true; this.ref = null; this.vel = null; }  // 解析で途切れた所：取り込み済みの場所から探し直す
+    if (opts.newSeg) { this.lost = true; this.ref = null; this.vel = null; this.kAnchor = null; }  // 解析で途切れた所：取り込み済みの場所から探し直す
     let motion = Infinity;
     if (!this.lost && this.ref) {
       const small = Math.min(frame.w, frame.h);
       const hint = opts.hint || this.vel || undefined;
       const fastScroll = hint && Math.hypot(hint.dx, hint.dy) > small * 0.1;
-      const r = register(this.ref, feat, { hint, fastScroll });
+      let r = register(this.ref, feat, { hint, prior: hint, fastScroll });
+      // 事前解析の移動量と大きく食い違い、しかも確信が弱い結果は信用しない
+      // （海のように模様が少ない所で、別の場所に吸着してしまうのを防ぐ）
+      // 重なりが小さい結果は、偶然の一致でも高い値が出るので採用しない
+      if (r && opts.hint) {
+        const dev = Math.hypot(r.dx - opts.hint.dx, r.dy - opts.hint.dy);
+        if (r.overlap < 0.2 || dev > Math.max(60, small * 0.1) || (r.score < 0.85 && dev > Math.max(40, small * 0.06))) r = null;
+      }
       if (r && r.score >= st.threshold) {
+        this.lastScore = r.score;
         motion = Math.hypot(r.dx, r.dy);
         this.vel = { dx: r.dx, dy: r.dy };
         this.pos = { x: this.pos.x + r.dx, y: this.pos.y + r.dy };
@@ -218,22 +244,30 @@ export class Tracker {
       // 近い順に並べて全タイルから探す（追加動画で不足部分を埋めるときもここで復帰）
       let order = this.mosaic.placed();
       if (this.pos) order = [...order].sort((a, b) => Math.hypot(a.x - this.pos.x, a.y - this.pos.y) - Math.hypot(b.x - this.pos.x, b.y - this.pos.y));
-      const hit = await st.locate(feat, order);
+      let hit = await st.locate(feat, order);
+      // 事前解析の経路から期待される位置と大きく違い、確信も弱い結果は信用しない（模様の少ない所で別の場所に合ってしまうため）
+      if (hit && this.kAnchor && opts.kpos && !opts.newSeg) {
+        const ex = this.kAnchor.px + (opts.kpos.x - this.kAnchor.kx), ey = this.kAnchor.py + (opts.kpos.y - this.kAnchor.ky);
+        const sm = Math.min(frame.w, frame.h);
+        if (Math.hypot(hit.x - ex, hit.y - ey) > Math.max(60, sm * 0.12)) hit = null;
+      }
       if (!hit) {
         this.stats.lost++;
         // 取り込み済みの場所のはずなのに合わない：拡大率や向きが違う可能性（3コマに1回調べる）
         if (opts.key || this.tf.lostFrames++ % 3 === 0) {
-          for (const t of order.slice(0, 2)) if (this.checkTransform(t.feat, feat)) return this.transformResult(rectAt(this.pos));
+          for (const t of order.slice(0, 3)) if (this.checkTransform(t.feat, feat)) return this.transformResult(rectAt(this.pos));
         }
         return { state: 'lost', rect: rectAt(this.pos) };
       }
       this.clearTransform();
       this.pos = { x: hit.x, y: hit.y };
+      this.lastScore = hit.score;
       this.ref = feat;
       this.lost = false;
       motion = Infinity;
     }
 
+    if (opts.kpos) this.kAnchor = { kx: opts.kpos.x, ky: opts.kpos.y, px: this.pos.x, py: this.pos.y };
     const { frac: unc, area: uncArea } = this.mosaic.uncoveredArea(this.pos.x, this.pos.y, frame.w, frame.h);
     const small = Math.min(frame.w, frame.h);
     const still = motion <= Math.max(2, small * 0.015);
@@ -271,10 +305,16 @@ export class Tracker {
         }
       }
 
+      // 位置の確からしさ：既存タイルと直接合わせられたらその値、なければ直前のコマとの値
+      const conf = fix ? fix.score : (this.lastScore ?? 0);
       this.posHistory.push({ ...this.pos });
       if (this.posHistory.length > 10) this.posHistory.shift();  // 履歴は最大10フレーム保持
 
-      await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true);
+      const tile = await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true);
+      tile.conf = conf;
+      tile.vt = opts.vt;  // 動画の時刻（デバッグ用）
+      tile.weak = conf < 0.7 || !fix && this.mosaic.placed().length > 1 && unc < 0.9; // 既存タイルで確かめられなかった
+      if (tile.weak) this.stats.weak = (this.stats.weak || 0) + 1;
       this.stats.added++;
       return { state: 'added', rect: rectAt(this.pos) };
     }

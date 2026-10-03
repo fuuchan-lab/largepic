@@ -256,8 +256,21 @@ function coarseCandidates(a, b, opts) {
     const r = searchLocal(A, B, c.dx, c.dy, 1, minOverlap, 1);
     if (r) scored.push(r);
   }
-  scored.sort((p, q) => q.score - p.score);
+  for (const r of scored) r.adj = adjusted(r, opts.prior, A);
+  scored.sort((p, q) => q.adj - p.adj);
   return scored;
+}
+
+// 候補の総合点：重なりが小さい一致は割り引き、直前の動き（prior）から外れる候補は減点する。
+// 線状の特徴（海岸線など）だけが映っていると、線に沿ってずらしても高い値が出てしまい
+// （開口問題）、重なりの小さい別の場所に合ってしまうのを防ぐ。
+function adjusted(r, prior, L) {
+  let v = r.score * (0.7 + 0.3 * Math.min(1, r.overlap / 0.5));
+  if (prior) {
+    const dx = r.dx - prior.dx * L.scale, dy = r.dy - prior.dy * L.scale;
+    v -= 0.25 * Math.min(1, Math.hypot(dx, dy) / (0.5 * Math.min(L.w, L.h)));
+  }
+  return v;
 }
 
 // 粗い解像度だけで素早く当たりをつける（多数のタイルから探すとき用）
@@ -271,11 +284,14 @@ export function coarseMatch(a, b, opts = {}) {
 export function register(a, b, opts = {}) {
   const minOverlap = opts.minOverlap ?? 0.08;
   const scored = coarseCandidates(a, b, opts);
-  let best = null;
+  let best = null, bestAdj = -Infinity;
+  const L = { scale: 1, w: a.w, h: a.h };
   for (const c of scored.slice(0, 3)) {
     const r = refine(a, b, c.dx, c.dy, minOverlap, opts.fastScroll);
-    if (r && (!best || r.score > best.score)) best = r;
-    if (best && best.score > 0.85) break;
+    if (!r) continue;
+    const adj = adjusted(r, opts.prior, L);
+    if (adj > bestAdj) { best = r; bestAdj = adj; }
+    if (best && best.score > 0.85 && best.overlap >= 0.5) break;
   }
   return best; // {dx, dy, score, overlap} | null
 }
@@ -374,7 +390,24 @@ function warpGray(img, phi, k) {
 // 戻り値: { angle: 度（b を a に重ねるために回す角。-180〜180）, scale: b を a に重ねるための倍率, score } か null
 //   scale < 1 … b のほうが拡大されている（ズームインした）／ scale > 1 … 縮小されている
 // opts.minAngle (度) / opts.minScale (比率の差) 未満の違いは「なし」として null を返す
+// 模様の豊かさ：粗い画像で勾配が大きい画素の割合（海や空白が多いと小さい）
+export function richness(f) {
+  if (f._rich != null) return f._rich;
+  const { data, w, h } = f.coarse;
+  let n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const o = y * w + x;
+      if (Math.abs(data[o + 1] - data[o - 1]) + Math.abs(data[o + w] - data[o - w]) > 14) n++;
+    }
+  }
+  return (f._rich = n / ((w - 2) * (h - 2)));
+}
+
 export function diagnoseTransform(a, b, opts = {}) {
+  // 模様の少ない画像（海など）では回転・拡大の推定が偶然の一致になりやすいので、診断しない
+  const minRich = opts.minRichness ?? 0.05;
+  if (richness(a) < minRich || richness(b) < minRich) return null;
   const minAngle = opts.minAngle ?? 3, minScale = opts.minScale ?? 0.04;
   const la = logPolar(a), lb = logPolar(b);
   const re = new Float64Array(FM_A * FM_R), im = new Float64Array(FM_A * FM_R);
@@ -407,7 +440,7 @@ export function diagnoseTransform(a, b, opts = {}) {
   if (plain && plain.score >= 0.6) return null; // 平行移動だけで十分合う
   let best = null;
   const A = a.coarse, B = b.coarse;
-  for (const p of peaks.slice(0, 4)) {
+  for (const p of peaks.slice(0, 6)) {
     if (best && best.score >= 0.7) break;
     const sa = p.y >= FM_A / 2 ? p.y - FM_A : p.y;       // 角度方向（周期 π）
     const sr = p.x >= FM_R / 2 ? p.x - FM_R : p.x;       // 対数半径方向
@@ -434,5 +467,8 @@ export function diagnoseTransform(a, b, opts = {}) {
   if (!best) return null;
   if (plain && plain.score >= best.score * 0.9) return null; // 回転・拡大なしでも同じくらい合う
   const significant = Math.abs(best.angle) >= minAngle || Math.abs(Math.log(best.scale)) >= Math.log(1 + minScale);
-  return significant && best.score >= (opts.minScore ?? 0.4) ? best : null;
+  // 偽陽性を避けるため、変形後にしっかり合う（0.6 以上）ものだけ採用する。
+  // 模様の少ない海などでは偶然に近い値が出るので、平行移動で合う場合との差も求める。
+  const margin = best.score - (plain ? Math.max(0, plain.score) : 0);
+  return significant && best.score >= (opts.minScore ?? 0.6) && margin >= 0.15 ? best : null;
 }

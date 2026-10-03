@@ -239,7 +239,7 @@ async function addVideo(file) {
       });
       if (!prog.cancelled && plan.samples.length >= 3 && plan.brokenFraction < 0.5) {
         keys = selectKeyframes(plan);
-        console.log(`解析(${plan.mode}): ${plan.samples.length}コマ → キーフレーム ${keys.length}`);
+        console.log(`解析(${plan.mode}): ${plan.samples.length}コマ → キーフレーム ${keys.length} 途切れ${Math.round(plan.brokenFraction * 100)}% 区間${new Set(plan.samples.map((q) => q.seg)).size}`);
         if (keys.length < 2) keys = null;
       }
     } catch (err) {
@@ -254,7 +254,7 @@ async function addVideo(file) {
         await seek(video, k.t);
         const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
         const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
-        const r = await tracker.process(frame, { hint, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
+        const r = await tracker.process(frame, { hint, kpos: { x: k.x, y: k.y }, vt: k.t, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
         if (r.state === 'transform') { stopped = { r, t: k.t }; break; }
         if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
         liveRect = r.rect; liveLost = r.state === 'lost';
@@ -288,13 +288,16 @@ async function addVideo(file) {
     liveRect = null;
     view.fit();
     const { added, lost } = tracker.stats;
+    console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
     if (stopped) {
       pendingWarn = [stopped.r, `動画の ${(stopped.t - start).toFixed(1)} 秒付近`,
         added ? `ここまでの${added}枚は取り込み済みです。` : ''];
     } else if (!wasEmpty && added === 0) {
       toast('取り込み済みの場所が見つからず、追加できませんでした。撮影の最初に取り込み済みの場所を映してください', 7000);
     } else {
-      toast(`動画から${added}枚を取り込みました` + (lost > 3 ? `（${lost}コマは位置が分からずスキップ）` : ''), 5000);
+      const weak = tracker.stats.weak || 0;
+      toast(`動画から${added}枚を取り込みました` + (lost > 3 ? `（${lost}コマは位置が分からずスキップ）` : '')
+        + (weak ? `。${weak}枚は位置に自信がありません（海など模様の少ない所）。［✥調整］のオレンジの枠を確認してください` : ''), weak ? 8000 : 5000);
     }
   } catch (err) {
     console.error(err);

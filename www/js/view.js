@@ -159,6 +159,11 @@ export class View {
       ctx.setLineDash([]);
     }
     if (this.mode === 'adjust') {
+      // 位置に自信のないタイル（海など模様の少ない所）はオレンジの点線で示す
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = '#ffb020'; ctx.lineWidth = 2;
+      for (const t of mosaic.tiles) if (t.weak && t.placed) ctx.strokeRect(sx(t.x), sy(t.y), t.w * s, t.h * s);
+      ctx.setLineDash([]);
       for (const t of mosaic.tiles) {
         if (t === this.selected) continue;
         ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;

@@ -105,7 +105,7 @@ export async function analyzeVideo(video, crop, opts) {
     if (!prev) {
       out.push({ t, x, y, seg, speed: Infinity });
     } else {
-      const r = coarseMatch(prev.feat, feat, { hint: vel || undefined });
+      const r = coarseMatch(prev.feat, feat, { hint: vel || undefined, prior: vel || undefined });
       if (r && r.score >= threshold) {
         const dx = r.dx / sc, dy = r.dy / sc;
         x += dx; y += dy; vel = { dx, dy };
