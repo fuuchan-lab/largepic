@@ -1,7 +1,7 @@
 // オフラインでも開けるようにアプリ本体をキャッシュ（ネット優先）
 const CACHE = 'largepic-v2';
 const FILES = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/mosaic.js', 'js/view.js', 'js/stitcher.js',
-  'js/register.js', 'js/imageutil.js', 'js/cropdialog.js', 'js/store.js', 'js/analyze.js', 'js/viewer.js', 'js/viewer-sources.js', 'js/tiles.js', 'js/library.js', 'js/trim.js', 'js/native.js',
+  'js/register.js', 'js/imageutil.js', 'js/cropdialog.js', 'js/store.js', 'js/analyze.js', 'js/viewer.js', 'js/viewer-sources.js', 'js/tiles.js', 'js/library.js', 'js/awake.js', 'js/jobs.js', 'js/trim.js', 'js/native.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-32.png', 'icons/icon-180.png'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

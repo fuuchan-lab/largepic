@@ -5,6 +5,7 @@
 //  3) 経路上で、前のキーフレームと十分重なる範囲でできるだけ「止まっている」コマを選ぶ
 import { cropRect, newCanvas } from './imageutil.js';
 import { coarseMatch, scalesFor } from './register.js';
+import { yieldNow } from './awake.js';
 
 function waitSeeked(video, t, ms = 4000) {
   return new Promise((res) => {
@@ -81,7 +82,7 @@ async function collectBySeek(video, grabber, { start, end, step, onProgress, isC
     await waitSeeked(video, t);
     samples.push({ t, feat: grabber.grab() });
     onProgress?.((t - start) / Math.max(0.01, end - start));
-    await new Promise((r) => setTimeout(r, 0));
+    await yieldNow();
   }
   return samples;
 }
@@ -118,7 +119,7 @@ export async function analyzeVideo(video, crop, opts) {
       prev.feat = null; // 使い終わったコマはメモリから外す
     }
     prev = raw[i];
-    if (i % 6 === 5) await new Promise((r) => setTimeout(r, 0));
+    if (i % 6 === 5) await yieldNow();
     opts.onAnalyze?.(i / raw.length);
   }
   return { samples: out, w: grabber.w, h: grabber.h, mode, brokenFraction: raw.length ? broken / raw.length : 1 };

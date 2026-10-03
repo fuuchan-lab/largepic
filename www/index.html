@@ -180,7 +180,7 @@
   </div>
   <div class="row end">
     <button data-close>閉じる</button>
-    <button id="expGo" class="primary">画像を作成</button>
+    <button id="expGo" class="primary">画像を保存</button>
   </div>
 </dialog>
 
@@ -211,6 +211,7 @@
   <div class="row">
     <button id="btnClear" class="danger">すべて消去して新しく始める</button>
   </div>
+  <label class="check"><input type="checkbox" id="setNotify"> 取り込みが終わったら通知する（別の画面を見ているとき）</label>
   <div class="row">
     <button id="btnDiag">診断情報をコピー</button>
   </div>
@@ -325,6 +326,15 @@
     <button id="undoBatch">直近の取り込み（<span id="undoBatchN">0</span>枚）をすべて取り消す</button>
   </div>
   <div class="row end"><button data-close>閉じる</button></div>
+</dialog>
+
+<dialog id="dlgResume">
+  <h2>取り込みの続き</h2>
+  <p id="rsBody" class="sub"></p>
+  <div class="row end">
+    <button id="rsDiscard">破棄する</button>
+    <button id="rsGo" class="primary">続きから取り込む</button>
+  </div>
 </dialog>
 
 <dialog id="dlgRestore">

@@ -5,6 +5,8 @@ import { analyzeVideo, selectKeyframes } from './analyze.js';
 import { ImageViewer } from './viewer.js';
 import { exportTiles } from './tiles.js';
 import { library } from './library.js';
+import { keepAwake, sleep } from './awake.js';
+import { jobs } from './jobs.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -13,7 +15,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.7';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.8';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -74,6 +76,8 @@ function updateStats() {
   $('#stats').textContent = s;
 }
 function setBusy(b) {
+  if (b && !busy) keepAwake(true);        // 処理中は画面を消さない（消えると処理が止まるため）
+  if (!b && busy) keepAwake(false);
   busy = b;
   $('#btnFill').hidden = b || !mosaic.tiles.length || coverage > 0.995;
 }
@@ -108,11 +112,12 @@ const prog = {
     if (!$('#dlgProgress').open) $('#dlgProgress').showModal();
   },
   set(v, text) {
+    document.title = `(${Math.round(v * 100)}%) LargePic`;   // 別のタブにいても、タブの名前で進み具合が分かる
     $('#progBar').value = v;
     if (text != null) $('#progText').textContent = text;
     drawOverview($('#progMini'), mosaic, { liveRect, lost: liveLost });
   },
-  close() { if ($('#dlgProgress').open) $('#dlgProgress').close(); },
+  close() { document.title = '画像つなぎ LargePic'; if ($('#dlgProgress').open) $('#dlgProgress').close(); },
 };
 $('#progCancel').onclick = () => { prog.cancelled = true; };
 $('#dlgProgress').addEventListener('cancel', (e) => { e.preventDefault(); prog.cancelled = true; });
@@ -280,13 +285,14 @@ let pendingWarn = null;
 // 直前の動画取り込みの記録（診断情報としてコピーできる）
 const importLog = { events: [] };
 // file: File または Blob（ネイティブの録画ファイル）
-async function addVideo(file) {
+async function addVideo(file, resume = null) {
   if (!file || busy) return;
   setBusy(true);
   const video = $('#video');
   const url = URL.createObjectURL(file);
-  const wasEmpty = !mosaic.tiles.length;
-  const batch = mosaic.newBatch();
+  const wasEmpty = resume ? resume.wasEmpty : !mosaic.tiles.length;
+  const batch = resume ? resume.batch : mosaic.newBatch();
+  let jobActive = false;
   const t0Import = Date.now();
   importLog.events = [];
   Object.assign(importLog, { batch, file: file.name || '(blob)', size: file.size, startedAt: new Date().toISOString(), tilesBefore: mosaic.tiles.length });
@@ -298,19 +304,21 @@ async function addVideo(file) {
     const dur = video.duration;
     if (!isFinite(dur) || !video.videoWidth) throw new Error('この動画は読み込めませんでした');
     await seek(video, Math.min(0.2, dur / 2));
-    const sel = await askCrop('video', video, video.videoWidth, video.videoHeight, { video });
+    const sel = resume ? { crop: resume.crop, start: resume.start, end: resume.end }
+      : await askCrop('video', video, video.videoWidth, video.videoHeight, { video });
     if (!sel) return;
     const { crop, start, end } = sel;
     const tracker = new Tracker(stitcher);
     prog.open(wasEmpty ? '動画からつなげています…' : '追加の動画を取り込んでいます…');
     const step = settings.videoStep;
-    let fitted = !wasEmpty;
+    let fitted = !wasEmpty || !!resume;
     let stopped = null;
 
     // 1) 事前解析：縮小した画像でスクロールの経路をたどり、取り込むコマ（キーフレーム）だけを選ぶ
-    let keys = null;
+    let keys = resume ? resume.keys : null;
     let fallbackWhy = '';
     try {
+      if (resume) throw new Error('RESUME');   // 続きの取り込み：解析はやり直さない
       if (settings.fullScan) throw new Error('全コマ方式（設定）');
       prog.set(0, '動画を解析しています…');
       const plan = await analyzeVideo(video, crop, {
@@ -326,16 +334,23 @@ async function addVideo(file) {
         if (keys.length < 2) keys = null;
       }
     } catch (err) {
-      console.warn('解析に失敗。全コマ方式に切り替えます', err);
-      fallbackWhy = settings.fullScan ? '' : '（解析に失敗したため全コマ方式）';
-      importLog.analysisError = String(err && err.message || err);
+      if (!resume) {
+        console.warn('解析に失敗。全コマ方式に切り替えます', err);
+        fallbackWhy = settings.fullScan ? '' : '（解析に失敗したため全コマ方式）';
+        importLog.analysisError = String(err && err.message || err);
+      }
     }
 
     if (keys) {
+      // 途中経過を端末に残す：ブラウザが裏でページを止めても、戻ったときに続きから取り込める
+      if (resume) jobActive = true;
+      else jobActive = await jobs.start({ keys, crop, start, end, batch, wasEmpty, name: file.name || '動画' }, file);
       // 2) 選んだコマだけを高解像度で取り込む（解析で分かった移動量を位置合わせのヒントに使う）
-      for (let i = 0; i < keys.length; i++) {
+      const i0 = resume ? Math.min(resume.next, keys.length - 1) : 0;
+      if (resume) keys[i0] = { ...keys[i0], newSeg: true };   // 続きの最初は、取り込み済みの場所から探し直す
+      for (let i = i0; i < keys.length; i++) {
         if (prog.cancelled) break;
-        const k = keys[i], pk = keys[i - 1];
+        const k = keys[i], pk = i > i0 ? keys[i - 1] : null;
         await seek(video, k.t);
         const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
         const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
@@ -355,6 +370,7 @@ async function addVideo(file) {
           : liveLost ? ' ・ 位置を探しています（取り込み済みの場所が映るまで待機）' : '';
         prog.set(0.4 + 0.6 * (i + 1) / keys.length,
           `取り込み ${i + 1} / ${keys.length} コマ ・ 追加 ${tracker.stats.added}枚${msg}`);
+        if (jobActive) jobs.progress(Math.max(0, i - 1));   // 直前の1コマは、保存が間に合っていないかもしれないのでやり直す
         await nextFrame();
       }
     } else {
@@ -408,6 +424,8 @@ async function addVideo(file) {
     toast('エラー: ' + err.message, 5000);
   } finally {
     prog.close();
+    jobs.clear();
+    notifyDone('動画の取り込みが終わりました');
     if (pendingWarn) { showTransformWarning(...pendingWarn); pendingWarn = null; }
     video.removeAttribute('src');
     video.load();
@@ -592,7 +610,7 @@ async function liveLoop() {
       }
     }
     const dt = performance.now() - t0;
-    await new Promise((r) => setTimeout(r, Math.max(30, 120 - dt)));
+    await sleep(Math.max(30, 120 - dt));   // 別のタブを見ていても間引かれない待ち方
   }
 }
 
@@ -1032,6 +1050,24 @@ window.addEventListener('keydown', (e) => {
   else if (!$('#gallery').hidden) closeGallery();
 });
 
+// ---------- 完了の通知（別のタブ・アプリを見ているとき）----------
+function notifyDone(msg) {
+  try {
+    if (settings.notify && document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification('LargePic', { body: msg });
+  } catch { /* 通知に対応していない端末もある */ }
+}
+$('#setNotify').checked = !!settings.notify;
+$('#setNotify').onchange = async () => {
+  const on = $('#setNotify').checked;
+  if (on && 'Notification' in window && Notification.permission !== 'granted') {
+    const p = await Notification.requestPermission();
+    if (p !== 'granted') { $('#setNotify').checked = false; toast('通知が許可されませんでした', 4000); settings.notify = false; saveSettings(); return; }
+  } else if (on && !('Notification' in window)) {
+    $('#setNotify').checked = false; toast('この端末のブラウザは通知に対応していません', 4000); return;
+  }
+  settings.notify = on; saveSettings();
+};
+
 // ---------- 診断情報 ----------
 $('#appVersion').textContent = APP_VERSION;
 function diagnostics() {
@@ -1088,7 +1124,25 @@ async function boot() {
       }
     } else {
       await store.clear();
+      await jobs.clear();
     }
+  }
+  // 前回、動画の取り込みの途中でページが止まっていたら、続きから取り込めるようにする
+  const job = await jobs.load();
+  if (job && (mosaic.tiles.length || job.meta.wasEmpty)) {
+    const m = job.meta, total = m.keys.length;
+    $('#rsBody').textContent = `動画「${m.name}」の取り込みが途中（${Math.min(m.next, total)} / ${total} コマ）で止まっていました。別の画面を見ている間にブラウザが止めた可能性があります。続きから取り込みますか？`;
+    const dlg = $('#dlgResume');
+    const go = await new Promise((res) => {
+      $('#rsGo').onclick = () => { dlg.close(); res(true); };
+      $('#rsDiscard').onclick = () => { dlg.close(); res(false); };
+      dlg.oncancel = (e) => e.preventDefault();
+      dlg.showModal();
+    });
+    if (go) addVideo(job.blob, { ...m, next: m.next });
+    else await jobs.clear();
+  } else if (job) {
+    await jobs.clear();
   }
   checkNativePending();
 }

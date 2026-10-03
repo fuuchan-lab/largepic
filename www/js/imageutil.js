@@ -106,4 +106,5 @@ export async function decodeCrop(blob, sx, sy, w, h) {
   return bmp;
 }
 
-export const nextFrame = () => new Promise((r) => setTimeout(r, 0));
+import { yieldNow } from './awake.js';
+export const nextFrame = yieldNow;   // 裏のタブでも間引かれない待ち方（awake.js）
