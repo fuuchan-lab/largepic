@@ -17,7 +17,7 @@
 <header class="top">
   <img class="logo" src="icons/icon-192.png" alt="">
   <div class="brand">LargePic<small>画像つなぎ</small></div>
-  <div id="stats" class="stats">撮影して始めましょう</div>
+  <div id="stats" class="stats">動画を取り込んで始めましょう</div>
   <button id="btnHelp" class="icon" title="使い方" aria-label="使い方">?</button>
 </header>
 
@@ -30,13 +30,13 @@
     <h1>スクロールした画面を<br>1枚の大きな画像に</h1>
     <p>地図アプリなどを画面収録しながら縦横にスクロールするだけ。自動で認識してつなぎ合わせます。</p>
     <div class="empty-actions">
-      <button class="primary big" data-action="capture">● 撮影をはじめる</button>
+      <button class="primary big" data-action="capture">● 動画を取り込む</button>
       <button data-action="images">スクリーンショットから作る</button>
     </div>
     <p class="hint"><a href="#" data-action="help">撮影のコツを見る</a> ・ <a href="#" data-action="viewer">保存した大きな画像を見る</a></p>
   </div>
 
-  <button id="btnFill" class="fill-chip" hidden>不足部分を追加撮影</button>
+  <button id="btnFill" class="fill-chip" hidden>不足部分を動画で追加</button>
 
   <div id="recbar" class="livebar" hidden>
     <span class="live-state rec">●</span>
@@ -67,7 +67,7 @@
 </main>
 
 <nav class="tools">
-  <button data-action="capture" class="rec-btn"><span class="ic">●</span><span>撮影</span></button>
+  <button data-action="capture" class="rec-btn"><span class="ic">●</span><span>動画取込</span></button>
   <button data-action="images"><span class="ic">＋</span><span>画像</span></button>
   <button id="btnViewer"><span class="ic">🔍</span><span>閲覧</span></button>
   <button id="btnAdjust"><span class="ic">✥</span><span>調整</span></button>
@@ -78,15 +78,15 @@
 </nav>
 
 <input type="file" id="fileImages" accept="image/*" multiple hidden>
-<input type="file" id="fileView" accept="image/*" hidden>
+<input type="file" id="fileView" accept="image/*,.zip,application/zip" hidden>
 <input type="file" id="fileVideo" accept="video/*" hidden>
 <video id="video" class="probe" muted playsinline preload="auto"></video>
 
 <!-- 撮影モード -->
 <dialog id="dlgCapture">
-  <h2 id="capTitle">画面収録で撮影</h2>
+  <h2 id="capTitle">動画を取り込む</h2>
   <p id="capFill" class="note" hidden>
-    <b>不足部分の追加撮影：</b>撮影を始めたら、まず<b>取り込み済みの場所</b>を1〜2秒映してください（位置を認識します）。そこから<b>赤い斜線の場所</b>へスクロールします。拡大率は前回と同じにしてください。
+    <b>不足部分を動画で追加：</b>録画を始めたら、まず<b>取り込み済みの場所</b>を1〜2秒映してください（位置を認識します）。そこから<b>赤い斜線の場所</b>へスクロールします。拡大率は前回と同じにしてください。
   </p>
   <div class="rules">
     <div><b class="n">1</b><span>撮影中は<b>拡大・縮小・回転をしない</b></span></div>
@@ -96,7 +96,7 @@
   <ol id="capSteps" class="steps"></ol>
   <div class="col">
     <button id="capStart" class="primary big" hidden>● 録画を開始</button>
-    <button id="capPick" class="big">撮影した動画を選ぶ</button>
+    <button id="capPick" class="big">録画した動画を選ぶ</button>
     <button id="capLive" hidden>この画面で他のタブ/ウィンドウをライブ取り込み</button>
   </div>
   <p class="sub center"><a href="#" data-action="help">くわしい撮影のコツ</a></p>
@@ -163,8 +163,9 @@
   </label>
   <label>形式
     <select id="expType">
-      <option value="image/png">PNG（劣化なし）</option>
-      <option value="image/jpeg">JPEG（軽い）</option>
+      <option value="image/png">PNG（劣化なし・1枚）</option>
+      <option value="image/jpeg">JPEG（軽い・1枚）</option>
+      <option value="tiles">分割保存（ZIP・画素数の制限なし・画質そのまま）</option>
     </select>
   </label>
   <p id="expWarn" class="warn"></p>
@@ -218,10 +219,10 @@
 
   <h3>かんたんな流れ</h3>
   <ol class="help">
-    <li>［● 撮影］から<b>画面収録</b>を始める</li>
+    <li>［● 動画取込］から<b>画面収録</b>を始める</li>
     <li>地図アプリに切り替えて、縦横にスクロール</li>
     <li>収録を止めて、この画面で取り込む（自動でつながります）</li>
-    <li><b>赤い斜線</b>＝足りない場所。［不足部分を追加撮影］で埋める</li>
+    <li><b>赤い斜線</b>＝足りない場所。［不足部分を動画で追加］で埋める</li>
     <li>［⬇ 保存］で形（四角／丸）と範囲を選んで1枚の画像に</li>
   </ol>
 
@@ -244,7 +245,7 @@
 
   <h3>不足部分を埋める</h3>
   <ul class="help">
-    <li>［不足部分を追加撮影］→ 撮影を始めたら<b>まず取り込み済みの場所を1〜2秒映す</b>（そこで位置を認識）→ 赤い斜線の場所へスクロール。</li>
+    <li>［不足部分を動画で追加］→ 録画を始めたら<b>まず取り込み済みの場所を1〜2秒映す</b>（そこで位置を認識）→ 赤い斜線の場所へスクロール。</li>
     <li>前回と<b>同じ拡大率</b>で撮影してください。</li>
   </ul>
 
@@ -252,7 +253,7 @@
   <ul class="help">
     <li><b>iPhone</b>：アプリの［録画を開始］、またはコントロールセンターの「画面収録」◉。止めるときは画面上部の赤い表示をタップ。<small>（コントロールセンターに無い場合：設定 → コントロールセンター → 画面収録を追加）</small></li>
     <li><b>Android</b>：アプリの［録画を開始］、またはクイック設定（上から2回スワイプ）の「スクリーンレコード」。止めるときは通知から。</li>
-    <li><b>PC</b>：［撮影］→［ライブ取り込み］でGoogleマップなどのタブを選ぶと、スクロールした範囲がリアルタイムで表示されます。</li>
+    <li><b>PC</b>：［動画取込］→［ライブ取り込み］でGoogleマップなどのタブを選ぶと、スクロールした範囲がリアルタイムで表示されます。</li>
   </ul>
 
   <h3>取り込む範囲（最初に聞かれます）</h3>
@@ -279,7 +280,7 @@
 </dialog>
 
 <dialog id="dlgWarn">
-  <h2 id="warnTitle">撮影を停止しました</h2>
+  <h2 id="warnTitle">取り込みを停止しました</h2>
   <p id="warnBody" class="sub"></p>
   <ul class="help" id="warnList"></ul>
   <div class="row end"><button id="warnOk" class="primary">OK</button></div>

@@ -3,6 +3,7 @@ import { View, drawOverview } from './view.js';
 import { Stitcher, Tracker } from './stitcher.js';
 import { analyzeVideo, selectKeyframes } from './analyze.js';
 import { ImageViewer } from './viewer.js';
+import { exportTiles } from './tiles.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -62,7 +63,7 @@ function updateStats() {
   mini.hidden = n === 0;
   coverage = n ? mosaic.coverage() : 0;
   $('#btnFill').hidden = !n || coverage > 0.995 || busy;
-  if (!n) { $('#stats').textContent = '撮影して始めましょう'; return; }
+  if (!n) { $('#stats').textContent = '動画を取り込んで始めましょう'; return; }
   const bb = mosaic.bbox();
   const un = mosaic.tiles.filter((t) => !t.placed).length;
   let s = `${n}枚`;
@@ -125,7 +126,7 @@ function describeTransform(r) {
   return parts.length ? parts : ['地図の向きまたは拡大率が変わっています'];
 }
 function showTransformWarning(r, where, extra) {
-  $('#warnTitle').textContent = '撮影を停止しました';
+  $('#warnTitle').textContent = '取り込みを停止しました';
   $('#warnBody').textContent = `${where}で、これまでの地図と合わなくなりました。${extra || ''}`;
   $('#warnList').innerHTML = describeTransform(r).map((t) => `<li><b>${t}</b></li>`).join('')
     + '<li>地図を<b>北上固定・回転オフ</b>にし、<b>拡大率は最初の撮影と同じ</b>にして、撮り直してください。</li>';
@@ -369,24 +370,24 @@ const STEPS = {
     'コントロールセンターを開き「画面収録」◉ をタップ（3秒後に開始）',
     '地図アプリでルールを守ってスクロール',
     '画面上部の赤い表示をタップして停止（写真アプリに保存されます）',
-    'このアプリに戻って［撮影した動画を選ぶ］',
+    'このアプリに戻って［録画した動画を選ぶ］',
   ],
   android: [
     'クイック設定（画面上から2回スワイプ）の「スクリーンレコード」で録画開始',
     '地図アプリでルールを守ってスクロール',
     '通知から録画を停止',
-    'このアプリに戻って［撮影した動画を選ぶ］',
+    'このアプリに戻って［録画した動画を選ぶ］',
   ],
   desktop: [
     '［ライブ取り込み］で地図のタブやウィンドウを選ぶと、スクロールした範囲がこの画面にリアルタイムで表示されます',
-    'または、画面録画した動画ファイルを［撮影した動画を選ぶ］で読み込み',
+    'または、画面録画した動画ファイルを［録画した動画を選ぶ］で読み込み',
   ],
 };
 
 function openCapture(fill = false) {
   if (busy) return toast('処理中です');
   const key = isNative ? 'native-' + nativePlatform : webPlatform;
-  $('#capTitle').textContent = fill ? '不足部分を追加撮影' : '画面収録で撮影';
+  $('#capTitle').textContent = fill ? '不足部分を動画で追加' : '動画を取り込む';
   $('#capFill').hidden = !fill;
   $('#capSteps').innerHTML = (STEPS[key] || STEPS.desktop).map((s) => `<li>${s}</li>`).join('');
   $('#capStart').hidden = !(isNative && ScreenRecorder);
@@ -737,11 +738,17 @@ function updateTrim(recompute = true) {
 }
 trim.onChange = () => updateScaleOptions();
 
+const isTiledExport = () => $('#expType').value === 'tiles';
+// 1枚の画像として作れる最大の倍率（端末のキャンバス上限）。分割保存なら制限なし
+function singleMaxScale(r) {
+  const { maxSide, maxArea } = exportLimits();
+  return Math.min(1, maxSide / r.w, maxSide / r.h, Math.sqrt(maxArea / (r.w * r.h)));
+}
 function updateScaleOptions() {
   const r = trim.rect;
   if (!r) return;
-  const { maxSide, maxArea } = exportLimits();
-  const maxScale = Math.min(1, maxSide / r.w, maxSide / r.h, Math.sqrt(maxArea / (r.w * r.h)));
+  const tiled = isTiledExport();
+  const maxScale = tiled ? 1 : singleMaxScale(r);
   const sel = $('#expScale');
   const prev = parseFloat(sel.value) || 1;
   sel.innerHTML = '';
@@ -756,10 +763,12 @@ function updateScaleOptions() {
   if (opts.includes(prev)) sel.value = prev;
   const un = mosaic.tiles.filter((t) => !t.placed).length;
   $('#expWarn').textContent = [
-    maxScale < 1 ? `この端末で作れる最大サイズに合わせて縮小します（最大 ${Math.round(maxScale * 100)}%）。` : '',
+    tiled ? '分割保存は、このアプリの［🔍 閲覧］で継ぎ目なく見られます。ZIPを展開すると、タイル画像（PNG）も取り出せます。'
+      : (maxScale < 1 ? `1枚の画像は、この端末では最大 ${Math.round(maxScale * 100)}% までです。元の画質で残すなら「分割保存」を選んでください。` : ''),
     un ? `未配置の${un}枚は含まれません。` : '',
   ].join(' ');
 }
+$('#expType').onchange = () => updateScaleOptions();
 
 document.querySelectorAll('#segShape button').forEach((b) => {
   b.onclick = () => { exp.shape = b.dataset.v; segSet('segShape', exp.shape); updateTrim(exp.fit !== 'free'); };
@@ -777,32 +786,44 @@ $('#btnExport').onclick = () => {
   $('#expGo').disabled = false;
   $('#dlgExport').showModal();
   updateTrim();
+  // 元の大きさでは1枚にできない大きさなら、分割保存を初期選択にする
+  if (trim.rect && singleMaxScale(trim.rect) < 1 && !isTiledExport()) { $('#expType').value = 'tiles'; updateScaleOptions(); }
 };
 $('#expGo').onclick = async () => {
   if (busy || !trim.rect) return;
   setBusy(true);
   $('#expGo').disabled = true;
   const scale = parseFloat($('#expScale').value);
-  const type = $('#expType').value;
+  const tiled = isTiledExport();
+  const type = tiled ? 'application/zip' : $('#expType').value;
   let bg = $('#expBg').value;
-  if (bg === 'transparent' && type !== 'image/png') bg = '#ffffff';
+  if (!tiled && bg === 'transparent' && type !== 'image/png') bg = '#ffffff';
   const circle = exp.shape === 'circle';
   $('#expDone').textContent = '作成中…';
   $('#expResult').hidden = false;
   $('#expDownload').hidden = true;
   $('#expShare').hidden = true;
   try {
-    const blob = await mosaic.exportBlob({
-      scale, background: bg, type, quality: 0.92, region: trim.rect, circle,
-      outside: circle && type !== 'image/png' ? bg : null,
-      onProgress: (p) => { $('#expDone').textContent = `作成中… ${Math.round(p * 100)}%`; },
-    });
-    if (lastUrl) URL.revokeObjectURL(lastUrl);
-    lastUrl = URL.createObjectURL(blob);
-    const ext = type === 'image/png' ? 'png' : 'jpg';
     const d = new Date();
     const p2 = (n) => String(n).padStart(2, '0');
-    const name = `LargePic-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}.${ext}`;
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    let blob;
+    if (tiled) {
+      ({ blob } = await exportTiles(mosaic, {
+        region: trim.rect, scale, background: bg, circle, name: `LargePic-${stamp}`,
+        onProgress: (p) => { $('#expDone').textContent = `分割して保存用データを作成中… ${Math.round(p * 100)}%`; },
+      }));
+    } else {
+      blob = await mosaic.exportBlob({
+        scale, background: bg, type, quality: 0.92, region: trim.rect, circle,
+        outside: circle && type !== 'image/png' ? bg : null,
+        onProgress: (p) => { $('#expDone').textContent = `作成中… ${Math.round(p * 100)}%`; },
+      });
+    }
+    if (lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = URL.createObjectURL(blob);
+    const ext = tiled ? 'zip' : (type === 'image/png' ? 'png' : 'jpg');
+    const name = `LargePic-${stamp}${tiled ? '-tiles' : ''}.${ext}`;
     lastFile = new File([blob], name, { type });
     const a = $('#expDownload');
     a.href = lastUrl;
@@ -812,7 +833,7 @@ $('#expGo').onclick = async () => {
     $('#expDone').textContent = `できました：${name}（${(blob.size / 1048576).toFixed(1)} MB）`;
   } catch (err) {
     console.error(err);
-    $('#expDone').textContent = 'エラー: ' + err.message + '　小さいサイズを選んで再度お試しください。';
+    $('#expDone').textContent = 'エラー: ' + err.message + (isTiledExport() ? '' : '　小さいサイズを選ぶか、分割保存を選んで再度お試しください。');
   } finally {
     $('#expGo').disabled = false;
     setBusy(false);

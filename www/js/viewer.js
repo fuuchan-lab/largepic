@@ -1,15 +1,13 @@
 // 大きな画像を地図のように拡大縮小して見るビューア（ドラッグ移動・ピンチ・ホイール・ダブルタップ・慣性）
-// 縮小表示はあらかじめ作った縮小画像（ミップマップ）から描くので、巨大な画像でも軽くてきれい。
-import { newCanvas } from './imageutil.js';
-
-const MAX_CANVAS_AREA = 16e6; // iOS Safari のキャンバス上限（約1,677万画素）に収める
+// 1枚の画像のほか、分割保存（タイル形式 .zip）も継ぎ目なく見られる。
+import { BitmapSource, TiledSource } from './viewer-sources.js';
+import { isZip } from './tiles.js';
 
 export class ImageViewer {
   constructor(canvas, onChange) {
     this.canvas = canvas;
     this.onChange = onChange;
-    this.img = null;
-    this.levels = [];
+    this.source = null;
     this.w = 0; this.h = 0;
     this.s = 1; this.ox = 0; this.oy = 0;   // 表示倍率（CSS px / 画像 px）と画像左上の画面位置
     this.pointers = new Map();
@@ -17,8 +15,13 @@ export class ImageViewer {
     this.anim = null;
     this.raf = 0;
     this._bind();
-    new ResizeObserver(() => { if (this.img) { this.resize(); } }).observe(canvas);
+    new ResizeObserver(() => { if (this.source) { this.resize(); } }).observe(canvas);
   }
+
+  // テスト・外部から参照できるよう従来の名前を残す
+  get img() { return this.source ? (this.source.img || this.source) : null; }
+  get levels() { return this.source?.levels || []; }
+  get tiled() { return this.source instanceof TiledSource; }
 
   get cw() { return this.canvas.clientWidth; }
   get ch() { return this.canvas.clientHeight; }
@@ -28,42 +31,30 @@ export class ImageViewer {
 
   async load(blob) {
     this.dispose();
-    this.url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.src = this.url;
-    await img.decode();
-    this.img = img;
-    this.w = img.naturalWidth; this.h = img.naturalHeight;
-    this.buildLevels();
+    const src = (await isZip(blob)) ? new TiledSource() : new BitmapSource();
+    try {
+      await src.open(blob);
+    } catch (e) {
+      src.dispose?.();
+      throw e;
+    }
+    this.source = src;
+    this.w = src.w; this.h = src.h;
     this.resize();
     this.fit(false);
   }
 
-  // 1/2, 1/4, … の縮小画像を作る（最初の段はキャンバス上限に収まる大きさから）
-  buildLevels() {
-    this.levels = [{ k: 1, src: this.img }];
-    let k = 0.5;
-    while (this.w * k * this.h * k > MAX_CANVAS_AREA) k /= 2;
-    let prev = this.img, prevK = 1;
-    while (Math.max(this.w, this.h) * k >= 200) {
-      const c = newCanvas(Math.max(1, Math.round(this.w * k)), Math.max(1, Math.round(this.h * k)));
-      const ctx = c.getContext('2d');
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(prev, 0, 0, c.width, c.height);
-      this.levels.push({ k, src: c });
-      prev = c; prevK = k;
-      k /= 2;
-    }
+  requestDraw() {
+    if (this._drawPending) return;
+    this._drawPending = true;
+    requestAnimationFrame(() => { this._drawPending = false; this.draw(); });
   }
 
   dispose() {
     cancelAnimationFrame(this.raf);
     this.anim = null;
-    for (const l of this.levels) if (l.src instanceof HTMLCanvasElement) l.src.width = l.src.height = 0;
-    this.levels = [];
-    this.img = null;
-    if (this.url) URL.revokeObjectURL(this.url);
-    this.url = null;
+    this.source?.dispose();
+    this.source = null;
   }
 
   resize() {
@@ -131,27 +122,13 @@ export class ImageViewer {
   }
 
   draw() {
-    if (!this.img) return;
+    if (!this.source) return;
     const dpr = this.dpr || 1, ctx = this.canvas.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = '#0d0f12';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    const sEff = this.s * dpr; // 画像1pxあたりの物理px
-    // 縮小率が 1/2 以内に収まる最も小さい段を使う
-    let lv = this.levels[0];
-    for (const l of this.levels) if (l.k >= sEff) lv = l;
-    ctx.imageSmoothingEnabled = sEff < 3;
-    ctx.imageSmoothingQuality = 'high';
-    // 見えている範囲だけ描く（巨大な描画先サイズを避ける）
-    const x0 = Math.max(0, -this.ox / this.s), y0 = Math.max(0, -this.oy / this.s);
-    const x1 = Math.min(this.w, (this.cw - this.ox) / this.s), y1 = Math.min(this.h, (this.ch - this.oy) / this.s);
-    if (x1 > x0 && y1 > y0) {
-      // 滑らかな補間のために1px余分に取る
-      const ax0 = Math.floor(x0), ay0 = Math.floor(y0), ax1 = Math.ceil(x1), ay1 = Math.ceil(y1);
-      ctx.drawImage(lv.src, ax0 * lv.k, ay0 * lv.k, (ax1 - ax0) * lv.k, (ay1 - ay0) * lv.k,
-        (this.ox + ax0 * this.s) * dpr, (this.oy + ay0 * this.s) * dpr, (ax1 - ax0) * this.s * dpr, (ay1 - ay0) * this.s * dpr);
-    }
-    this.onChange?.({ scale: this.s, sEff, fit: this.fitScale, w: this.w, h: this.h });
+    this.source.draw(ctx, this);
+    this.onChange?.({ scale: this.s, sEff: this.s * dpr, fit: this.fitScale, w: this.w, h: this.h, tiled: this.tiled });
   }
 
   _bind() {
@@ -161,7 +138,7 @@ export class ImageViewer {
     let lastTap = 0, lastTapPos = null;
 
     c.addEventListener('pointerdown', (e) => {
-      if (!this.img) return;
+      if (!this.source) return;
       c.setPointerCapture(e.pointerId);
       const p = pos(e);
       this.pointers.set(e.pointerId, p);
@@ -225,7 +202,7 @@ export class ImageViewer {
     c.addEventListener('pointercancel', end);
 
     c.addEventListener('wheel', (e) => {
-      if (!this.img) return;
+      if (!this.source) return;
       e.preventDefault();
       const p = pos(e);
       this.anim = null;
@@ -239,13 +216,13 @@ export class ImageViewer {
     }, { passive: false });
 
     c.addEventListener('dblclick', (e) => {
-      if (!this.img || e.pointerType === 'touch') return;
+      if (!this.source || e.pointerType === 'touch') return;
       const p = pos(e);
       if (this.s > this.fitScale * 1.5) this.fit(); else this.zoomTo(Math.max(this.fitScale * 3, 1 / (this.dpr || 1)), p.x, p.y);
     });
 
     window.addEventListener('keydown', (e) => {
-      if (!this.img || this.canvas.offsetParent === null) return;
+      if (!this.source || this.canvas.offsetParent === null) return;
       if (e.key === '+' || e.key === '=') this.zoomBy(1.5);
       else if (e.key === '-') this.zoomBy(1 / 1.5);
       else if (e.key === '0') this.fit();
