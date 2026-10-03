@@ -19,11 +19,15 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
     const outS = dlg.querySelector('[data-start-out]'), outE = dlg.querySelector('[data-end-out]');
     let start = 0, end = video ? video.duration : 0;
     // 記録しない領域（動かない物）：切り抜いた範囲に対する割合
-    const mask = { on: false, shape: 'ellipse', cx: 0.5, cy: 0.5, rw: 0.12, rh: 0.07, ...(opts.mask || {}) };
+    // 複数指定できる。編集用の写しを持ち、［この範囲で続ける］で返す
+    const masks = (opts.masks || []).map((m) => ({ ...m }));
+    let enabled = masks.length > 0, active = Math.max(0, masks.length - 1);
+    const newMask = () => ({ shape: 'ellipse', cx: 0.5, cy: 0.5, rw: 0.12, rh: 0.07 });
     const maskOn = dlg.querySelector('#maskOn'), maskCtl = dlg.querySelector('#maskCtl');
     const maskShapeBtns = dlg.querySelectorAll('#maskShape button');
     const maskDetect = dlg.querySelector('#maskDetect'), maskMsg = dlg.querySelector('#maskMsg');
-    const MSG0 = '赤い範囲をドラッグで動かし、右下の●で大きさを変えます。この範囲は記録せず、画面が動いたあとの絵で埋めます。';
+    const maskAdd = dlg.querySelector('#maskAdd'), maskDel = dlg.querySelector('#maskDel');
+    const MSG0 = '赤い範囲をタップで選び、ドラッグで動かし、右下の●で大きさを変えます。縮尺バーやアイコンなども［追加］で指定できます。この範囲は記録せず、画面が動いたあとの絵で埋めます。';
     // 元画像を縮小して保持
     const maxW = Math.min(window.innerWidth - 48, 520);
     const maxH = Math.min(window.innerHeight * 0.58, 640);
@@ -58,35 +62,42 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
       const knob = (x, y, w, h) => { ctx.beginPath(); ctx.roundRect(x - w / 2, y - h / 2, w, h, 4); ctx.fill(); };
       knob(hx, e.top, 44, 10); knob(hx, e.bottom, 44, 10);
       knob(e.left, hy, 10, 44); knob(e.right, hy, 10, 44);
-      if (mask.on) {
-        const m = maskBox(e);
-        ctx.save();
-        ctx.fillStyle = 'rgba(255,60,60,0.30)'; ctx.strokeStyle = '#ff4d4d'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
-        ctx.beginPath();
-        if (mask.shape === 'rect') ctx.rect(m.cx - m.rx, m.cy - m.ry, m.rx * 2, m.ry * 2); else ctx.ellipse(m.cx, m.cy, m.rx, m.ry, 0, 0, Math.PI * 2);
-        ctx.fill(); ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#ff4d4d';
-        ctx.beginPath(); ctx.arc(m.cx + m.rx, m.cy + m.ry, 9, 0, Math.PI * 2); ctx.fill();   // 大きさを変える●
-        ctx.restore();
+      if (enabled) {
+        masks.forEach((mk, i) => {
+          const m = maskBox(mk, e);
+          ctx.save();
+          ctx.fillStyle = i === active ? 'rgba(255,60,60,0.32)' : 'rgba(255,60,60,0.20)';
+          ctx.strokeStyle = i === active ? '#ff4d4d' : 'rgba(255,120,120,0.8)'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          if (mk.shape === 'rect') ctx.rect(m.cx - m.rx, m.cy - m.ry, m.rx * 2, m.ry * 2); else ctx.ellipse(m.cx, m.cy, m.rx, m.ry, 0, 0, Math.PI * 2);
+          ctx.fill(); ctx.stroke();
+          ctx.setLineDash([]);
+          if (i === active) { ctx.fillStyle = '#ff4d4d'; ctx.beginPath(); ctx.arc(m.cx + m.rx, m.cy + m.ry, 9, 0, Math.PI * 2); ctx.fill(); }   // 大きさを変える●
+          ctx.restore();
+        });
       }
     }
     // マスクのプレビュー上の位置（切り抜き範囲の中での割合）
-    function maskBox(e = edges()) {
+    function maskBox(mk, e = edges()) {
       const w = e.right - e.left, h = e.bottom - e.top;
-      return { cx: e.left + mask.cx * w, cy: e.top + mask.cy * h, rx: mask.rw * w, ry: mask.rh * h, w, h, left: e.left, top: e.top };
+      return { cx: e.left + mk.cx * w, cy: e.top + mk.cy * h, rx: mk.rw * w, ry: mk.rh * h, w, h, left: e.left, top: e.top };
     }
 
     let drag = null, maskGrab = null;
     const pos = (ev) => { const r = canvas.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
     const down = (ev) => {
       const p = pos(ev), e = edges();
-      if (mask.on) {
-        const m = maskBox(e);
-        if (Math.hypot(p.x - (m.cx + m.rx), p.y - (m.cy + m.ry)) < 22) { drag = 'mask-size'; canvas.setPointerCapture(ev.pointerId); return; }
-        const dx = (p.x - m.cx) / (m.rx + 8), dy = (p.y - m.cy) / (m.ry + 8);
-        if (dx * dx + dy * dy <= 1 || (mask.shape === 'rect' && Math.abs(p.x - m.cx) < m.rx + 8 && Math.abs(p.y - m.cy) < m.ry + 8)) {
-          drag = 'mask-move'; maskGrab = { dx: p.x - m.cx, dy: p.y - m.cy }; canvas.setPointerCapture(ev.pointerId); return;
+      if (enabled && masks.length) {
+        // 選んでいる範囲の●（大きさ変更）を最優先、次に範囲の中（手前＝あとから追加したものを優先）
+        const am = maskBox(masks[active], e);
+        if (Math.hypot(p.x - (am.cx + am.rx), p.y - (am.cy + am.ry)) < 22) { drag = 'mask-size'; canvas.setPointerCapture(ev.pointerId); return; }
+        for (let i = masks.length - 1; i >= 0; i--) {
+          const m = maskBox(masks[i], e);
+          const dx = (p.x - m.cx) / (m.rx + 8), dy = (p.y - m.cy) / (m.ry + 8);
+          if (dx * dx + dy * dy <= 1 || (masks[i].shape === 'rect' && Math.abs(p.x - m.cx) < m.rx + 8 && Math.abs(p.y - m.cy) < m.ry + 8)) {
+            active = i; syncMask(); draw();
+            drag = 'mask-move'; maskGrab = { dx: p.x - m.cx, dy: p.y - m.cy }; canvas.setPointerCapture(ev.pointerId); return;
+          }
         }
       }
       const d = [
@@ -100,13 +111,13 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
       const p = pos(ev);
       const cl = (v, max) => Math.max(0, Math.min(max, v));
       if (drag === 'mask-move' || drag === 'mask-size') {
-        const m = maskBox();
+        const mk = masks[active], m = maskBox(mk);
         if (drag === 'mask-move') {
-          mask.cx = Math.max(0, Math.min(1, (p.x - maskGrab.dx - m.left) / m.w));
-          mask.cy = Math.max(0, Math.min(1, (p.y - maskGrab.dy - m.top) / m.h));
+          mk.cx = Math.max(0, Math.min(1, (p.x - maskGrab.dx - m.left) / m.w));
+          mk.cy = Math.max(0, Math.min(1, (p.y - maskGrab.dy - m.top) / m.h));
         } else {
-          mask.rw = Math.max(0.02, Math.min(0.5, (p.x - m.cx) / m.w));
-          mask.rh = Math.max(0.02, Math.min(0.5, (p.y - m.cy) / m.h));
+          mk.rw = Math.max(0.02, Math.min(0.5, (p.x - m.cx) / m.w));
+          mk.rh = Math.max(0.02, Math.min(0.5, (p.y - m.cy) / m.h));
         }
         draw();
         return;
@@ -129,20 +140,41 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
 
     // 記録しない領域の操作
     const syncMask = () => {
-      maskOn.checked = !!mask.on;
-      maskCtl.hidden = !mask.on;
-      maskShapeBtns.forEach((b) => b.classList.toggle('on', b.dataset.v === mask.shape));
-      maskDetect.hidden = !(mask.on && video && opts.detect);
+      maskOn.checked = enabled;
+      maskCtl.hidden = !enabled;
+      const cur = masks[active];
+      maskShapeBtns.forEach((b) => b.classList.toggle('on', !!cur && b.dataset.v === cur.shape));
+      maskDetect.hidden = !(enabled && video && opts.detect);
+      maskDel.disabled = !masks.length;
     };
-    const onMaskOn = () => { mask.on = maskOn.checked; maskMsg.textContent = MSG0; syncMask(); draw(); };
-    const onShape = (ev) => { mask.shape = ev.currentTarget.dataset.v; syncMask(); draw(); };
+    const onMaskOn = () => {
+      enabled = maskOn.checked;
+      if (enabled && !masks.length) { masks.push(newMask()); active = 0; }
+      maskMsg.textContent = MSG0; syncMask(); draw();
+    };
+    const onShape = (ev) => { if (masks[active]) masks[active].shape = ev.currentTarget.dataset.v; syncMask(); draw(); };
+    const onAdd = () => {
+      const mk = newMask();
+      // 重ならないよう、少しずつずらして置く
+      mk.cx = 0.5 + 0.12 * (masks.length % 4) - 0.18; mk.cy = 0.5 + 0.14 * (masks.length % 3) - 0.14;
+      masks.push(mk); active = masks.length - 1; syncMask(); draw();
+    };
+    const onDel = () => {
+      if (!masks.length) return;
+      masks.splice(active, 1); active = Math.max(0, Math.min(active, masks.length - 1));
+      if (!masks.length) enabled = false;
+      syncMask(); draw();
+    };
     const onDetect = async () => {
       maskDetect.disabled = true; const label = maskDetect.textContent; maskDetect.textContent = '探しています…';
-      maskMsg.textContent = '動画を調べて、画面の同じ位置に居続ける物を探しています…';
+      maskMsg.textContent = '動画を調べて、画面の同じ位置に居続ける物（キャラクター・縮尺バー・アイコンなど）を探しています…';
       try {
         const r = await opts.detect({ ...crop }, { onProgress: (p) => { maskDetect.textContent = `探しています… ${Math.round(p * 100)}%`; } });
-        if (r.found) { Object.assign(mask, r.mask, { on: true }); maskMsg.textContent = '見つかりました。赤い範囲を確かめて、ずれていれば動かしてください。'; }
-        else maskMsg.textContent = r.reason || '見つかりませんでした。';
+        if (r.found) {
+          masks.splice(0, masks.length, ...r.masks.map((m) => ({ ...m })));
+          active = 0; enabled = true;
+          maskMsg.textContent = `${masks.length}か所見つかりました。赤い範囲を確かめて、ずれていれば動かしてください。いらないものは［削除］で消せます。`;
+        } else maskMsg.textContent = r.reason || '見つかりませんでした。';
       } catch (e) {
         console.warn(e); maskMsg.textContent = '自動で見つけられませんでした。範囲を自分で指定してください。';
       } finally {
@@ -153,6 +185,8 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
     maskOn.addEventListener('change', onMaskOn);
     maskShapeBtns.forEach((b) => b.addEventListener('click', onShape));
     maskDetect.addEventListener('click', onDetect);
+    maskAdd.addEventListener('click', onAdd);
+    maskDel.addEventListener('click', onDel);
     maskMsg.textContent = MSG0;
     syncMask();
 
@@ -196,6 +230,8 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
       maskOn.removeEventListener('change', onMaskOn);
       maskShapeBtns.forEach((b) => b.removeEventListener('click', onShape));
       maskDetect.removeEventListener('click', onDetect);
+      maskAdd.removeEventListener('click', onAdd);
+      maskDel.removeEventListener('click', onDel);
       dlg.querySelector('[data-ok]').onclick = null;
       dlg.querySelector('[data-cancel]').onclick = null;
       dlg.onclose = null;
@@ -203,7 +239,7 @@ export function editCrop(dlg, source, sw, sh, initial, opts = {}) {
       if (dlg.open) dlg.close();
       resolve(val);
     };
-    dlg.querySelector('[data-ok]').onclick = () => finish({ crop: { ...crop }, start, end, mask: { ...mask } });
+    dlg.querySelector('[data-ok]').onclick = () => finish({ crop: { ...crop }, start, end, masks: enabled ? masks.map((m) => ({ ...m })) : [] });
     dlg.querySelector('[data-cancel]').onclick = () => finish(null);
     dlg.onclose = () => finish(null);
     draw();

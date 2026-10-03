@@ -91,7 +91,7 @@ const hole = await page.evaluate(() => {
   const px = bb.x + bb.w * 0.5, py = bb.y + bb.h * 0.5;
   const cover = mosaic.tiles.filter((t) => px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h);
   if (!cover.length) return null;
-  for (const t of cover) t.mask = { shape: 'rect', cx: px - t.x, cy: py - t.y, rx: 30, ry: 20, x: px - t.x - 30, y: py - t.y - 20, w: 60, h: 40 };
+  for (const t of cover) t.masks = [{ shape: 'rect', cx: px - t.x, cy: py - t.y, rx: 30, ry: 20, x: px - t.x - 30, y: py - t.y - 20, w: 60, h: 40 }];
   return { px, py, before: mosaic.uncoveredArea(px - 80, py - 80, 160, 160).area, removed: 0, n: mosaic.tiles.length, tiles: cover.length };
 });
 console.log('hole', JSON.stringify(hole));

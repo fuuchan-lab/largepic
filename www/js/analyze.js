@@ -7,7 +7,7 @@ import { cropRect, newCanvas } from './imageutil.js';
 import { coarseMatch, scalesFor } from './register.js';
 import { yieldNow } from './awake.js';
 import { perf } from './perf.js';
-import { maskPx, flattenGray, inMask } from './mask.js';
+import { maskPxList, flattenGray } from './mask.js';
 
 const ANALYSIS_SIDE = 112;   // 解析用に縮小した画像の長辺（px）
 
@@ -21,14 +21,14 @@ function waitSeeked(video, t, ms = 4000) {
 }
 
 // 縮小して粗い特徴（register.js の coarse と同じ形）を作る
-function makeGrabber(video, crop, mask = null) {
+function makeGrabber(video, crop, masks = null) {
   const r = cropRect(video.videoWidth, video.videoHeight, crop);
   const sc = Math.min(1, ANALYSIS_SIDE / Math.max(r.w, r.h));   // 解析用の画像は小さくてよい（位置の細かい合わせは本番の取り込みでやる）
   const cw = Math.max(8, Math.round(r.w * sc)), ch = Math.max(8, Math.round(r.h * sc));
   const cv = newCanvas(cw, ch);
   const ctx = cv.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'medium';
-  const m = mask && mask.on ? maskPx(mask, cw, ch, 1) : null;   // 記録しない領域は、解析でも使わない
+  const ms = maskPxList(masks, cw, ch, 1);   // 記録しない領域は、解析でも使わない
   return {
     w: r.w, h: r.h, scale: cw / r.w,
     grab() {
@@ -36,7 +36,7 @@ function makeGrabber(video, crop, mask = null) {
       const d = ctx.getImageData(0, 0, cw, ch).data;
       const g = new Float32Array(cw * ch);
       for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) / 256;
-      if (m) flattenGray(g, cw, ch, m);
+      if (ms.length) flattenGray(g, cw, ch, ms);
       return { w: r.w, h: r.h, _fft: null, coarse: { data: g, w: cw, h: ch, scale: cw / r.w } };
     },
   };
@@ -114,7 +114,7 @@ async function collectBySeek(video, grabber, { start, end, step, onProgress, isC
 // 解析：サンプルごとの位置（区間ごとの相対座標）を求める
 // 戻り値: { samples: [{t, x, y, seg, speed}], w, h, brokenFraction }
 export async function analyzeVideo(video, crop, opts) {
-  const grabber = makeGrabber(video, crop, opts.mask);
+  const grabber = makeGrabber(video, crop, opts.masks);
   const step = opts.step ?? 0.1;
   const sc = grabber.scale;
   const threshold = (opts.threshold ?? 0.55) * 0.85;
@@ -271,7 +271,7 @@ export function makeKeyReader(video, grabFull, seek) {
 
 // 動画の中で「画面の同じ位置に居続ける物」（ポインター・キャラクターなど）を見つける。
 // 地図が動いても動かない、模様のある画素を数え、まとまった領域（連結成分）を探して、記録しない領域の案にする。
-// 戻り値: { found: true, mask: { shape, cx, cy, rw, rh } } または { found: false, reason }
+// 戻り値: { found: true, masks: [{ shape, cx, cy, rw, rh }, ...] } または { found: false, reason }
 export async function detectStatic(video, crop, { start = 0, end, seek, onProgress, maxSamples = 40 } = {}) {
   const grabber = makeGrabber(video, crop, null);
   const dur = Math.max(0.5, end - start);
@@ -335,21 +335,22 @@ export async function detectStatic(video, crop, { start = 0, end, seek, onProgre
     }
     comps.push({ x0, y0, x1, y1, area, raw });
   }
-  const good = comps.filter((c) => c.raw >= 6);
+  // ある程度の大きさがあり、画面の大部分を占めないもの（占めるものは、地図の無地の部分などの誤検出のおそれがある）
+  const good = comps.filter((c) => c.raw >= 6 && ((c.x1 - c.x0 + 1) * (c.y1 - c.y0 + 1)) < 0.3 * N);
   if (!good.length) return { found: false, reason: '動かない物は見つかりませんでした。範囲を自分で指定することもできます。' };
-  // 画面の真ん中に近く、ある程度大きいものを選ぶ
-  const maxArea = Math.max(...good.map((c) => c.area));
-  const cand = good.filter((c) => c.area >= maxArea * 0.3);
-  cand.sort((a, b) => Math.hypot((a.x0 + a.x1) / 2 - W / 2, (a.y0 + a.y1) / 2 - H / 2) - Math.hypot((b.x0 + b.x1) / 2 - W / 2, (b.y0 + b.y1) / 2 - H / 2));
-  const c = cand[0];
-  const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
-  const fill = c.raw / (bw * bh);
+  good.sort((a, b) => b.area - a.area);
   const m = 0.12;   // 余白（にじみ・影の分）
   onProgress?.(1);
-  const mask = {
-    shape: fill >= 0.55 ? 'rect' : 'ellipse',
-    cx: (c.x0 + c.x1 + 1) / 2 / W, cy: (c.y0 + c.y1 + 1) / 2 / H,
-    rw: Math.min(0.45, (bw / 2 / W) * (fill >= 0.55 ? 1 + m : 1.3)), rh: Math.min(0.45, (bh / 2 / H) * (fill >= 0.55 ? 1 + m : 1.3)),
-  };
-  return { found: true, mask, pairs };
+  // 画面の真ん中のポインターやキャラクターだけでなく、縮尺（スケール）バーやアイコンなど、動かないものすべて（大きい順に最大6個）
+  const masks = good.slice(0, 6).map((c) => {
+    const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
+    const fill = c.raw / (bw * bh);
+    const rect = fill >= 0.55;
+    return {
+      shape: rect ? 'rect' : 'ellipse',
+      cx: (c.x0 + c.x1 + 1) / 2 / W, cy: (c.y0 + c.y1 + 1) / 2 / H,
+      rw: Math.min(0.45, (bw / 2 / W) * (rect ? 1 + m : 1.3)), rh: Math.min(0.45, (bh / 2 / H) * (rect ? 1 + m : 1.3)),
+    };
+  });
+  return { found: true, masks, pairs };
 }

@@ -91,21 +91,35 @@ await page.evaluate(() => {
     q.fillStyle = '#fff'; q.beginPath(); q.arc(cx, cy, 30, 0, 7); q.fill();
     q.fillStyle = '#e00'; q.beginPath(); q.arc(cx, cy, 22, 0, 7); q.fill();
     q.fillStyle = '#000'; q.fillRect(cx - 4, cy - 12, 8, 24);
+    // 左下の縮尺（スケール）バー：緑の帯に黒い目盛り
+    if (window.__bar) {
+      q.fillStyle = '#0a0'; q.fillRect(40, 676, 110, 16);
+      q.fillStyle = '#000'; for (let i = 0; i <= 4; i++) q.fillRect(40 + i * 27, 668, 3, 32);
+    }
     return o.toDataURL('image/png');
   };
 });
 const P = [];
 for (let k = 0; k < 40; k++) P.push([500 + k * 18, 600]);
 for (let k = 0; k < 24; k++) P.push([500 + 39 * 18, 600 + k * 16]);
+const vidNoBar = await makeVideo('vidMask0', P);
+await page.evaluate(() => { window.__bar = true; });
 const vid = await makeVideo('vidMask', P);
-const redCount = () => page.evaluate(async () => {
+let curVid = vidNoBar;
+const colorCount = (kind) => page.evaluate(async (kind) => {
   const c = await window.largepic.mosaic.exportCanvas({ scale: 1 });
   const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-  let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 190 && d[i + 1] < 60 && d[i + 2] < 60 && d[i + 3] > 200) n++;
+  let n = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 200) continue;
+    if (kind === 'red' ? (d[i] > 190 && d[i + 1] < 60 && d[i + 2] < 60) : (d[i] < 40 && d[i + 1] > 140 && d[i + 1] < 200 && d[i + 2] < 40)) n++;
+  }
   return n;
-});
+}, kind);
+const redCount = () => colorCount('red');
+const barCount = () => colorCount('bar');
 const startImport = async () => {
-  await page.setInputFiles('#fileVideo', vid);
+  await page.setInputFiles('#fileVideo', curVid);
   await page.waitForSelector('#dlgCrop[open]', { timeout: 20000 });
 };
 const finishImport = async () => {
@@ -119,6 +133,7 @@ await page.evaluate(() => window.largepic.mosaic.clear());
 await startImport(); await finishImport();
 const redNoMask = await redCount();
 check(redNoMask > 500, `マスクなしだと、キャラクターが画像に残る（赤い画素 ${redNoMask}）`);
+curVid = vid;   // 以降は、縮尺バーも写っている動画
 
 // 2) 自動で見つける → 取り込み
 await page.evaluate(() => window.largepic.mosaic.clear());
@@ -132,21 +147,28 @@ console.log(msg);
 check(/見つかりました/.test(msg), '動かない物を自動で見つけられる');
 await page.screenshot({ path: path.join(tmp, 'mask-dialog.png') });
 await finishImport();
-const mk = await page.evaluate(() => window.largepic.settings.mask);
-console.log(JSON.stringify(mk));
-check(mk.on && Math.abs(mk.cx - 0.5) < 0.06 && Math.abs(mk.cy - 0.5) < 0.06, `見つけた位置が真ん中 (cx=${mk.cx.toFixed(2)}, cy=${mk.cy.toFixed(2)})`);
-check(mk.rw * 390 >= 28 && mk.rw * 390 <= 90, `範囲が物を覆い、広すぎない（半径 ${(mk.rw * 390).toFixed(0)}px）`);
-const redMask = await redCount();
-check(redMask === 0, `マスクありだと、キャラクターが画像に残らない（赤い画素 ${redMask}）`);
+const mks = await page.evaluate(() => window.largepic.settings.masks);
+console.log(JSON.stringify(mks));
+check(mks.length >= 2, `動かない物を複数見つけられる (${mks.length}か所)`);
+const mk = mks.find((m) => Math.abs(m.cx - 0.5) < 0.08 && Math.abs(m.cy - 0.5) < 0.08);
+check(!!mk, '画面の真ん中のキャラクターを見つけた');
+check(mk && mk.rw * 390 >= 28 && mk.rw * 390 <= 90, `範囲が物を覆い、広すぎない（半径 ${mk ? (mk.rw * 390).toFixed(0) : '-'}px）`);
+const bar = mks.find((m) => m.cx < 0.35 && m.cy > 0.8);
+check(!!bar, `左下の縮尺バーも見つけた (${bar ? `cx=${bar.cx.toFixed(2)}, cy=${bar.cy.toFixed(2)}` : '-'})`);
+const redMask = await redCount(), barMask = await barCount();
+check(redMask === 0 && barMask === 0 && true, `マスクありだと、キャラクターも縮尺バーも画像に残らない（赤 ${redMask}・バー ${barMask}）`);
 const info = await page.evaluate(() => {
   const { mosaic } = window.largepic;
+  const t0w = mosaic.tiles[0].w, t0h = mosaic.tiles[0].h;
   // すべてのタイルについて、物が写っていた位置（タイルの中心）が、ほかのタイルで覆われているか
-  const holes = mosaic.tiles.filter((t) => !mosaic.covers(t.x + t.mask.cx, t.y + t.mask.cy)).length;
-  return { n: mosaic.tiles.length, masked: mosaic.tiles.filter((t) => t.mask).length, holes, bb: mosaic.bbox() };
+  const holesAt = (pred) => mosaic.tiles.filter((t) => t.masks && t.masks.some(pred) && t.masks.filter(pred).some((m) => !mosaic.covers(t.x + m.cx, t.y + m.cy))).length;
+  return { n: mosaic.tiles.length, masked: mosaic.tiles.filter((t) => t.masks && t.masks.length).length,
+    holes: holesAt((m) => Math.abs(m.cx / t0w - 0.5) < 0.1 && Math.abs(m.cy / t0h - 0.5) < 0.1), barHoles: holesAt((m) => m.cx / t0w < 0.35 && m.cy / t0h > 0.8), bb: mosaic.bbox() };
 });
 console.log(JSON.stringify(info));
 check(info.masked === info.n && info.n >= 6, `すべてのタイルに記録しない領域がある (${info.masked}/${info.n}枚)`);
-check(info.holes === 0, `物に隠れていた部分は、動いたあとの絵で埋まっている（埋まっていない所 ${info.holes}か所）`);
+check(info.holes === 0, `キャラクターに隠れていた部分は、動いたあとの絵で埋まっている（埋まっていない所 ${info.holes}か所）`);
+check(info.barHoles <= 3, `縮尺バーに隠れていた部分も、ほぼ埋まっている（動画の最初と最後の端を除く。埋まっていない所 ${info.barHoles}か所）`);
 // 位置合わせに影響しない：全体の大きさが正しい（東へ 39*18、南へ 23*16、1フレーム 390×616）
 check(Math.abs(info.bb.w - (39 * 18 + 390)) <= 20 && Math.abs(info.bb.h - (23 * 16 + 616)) <= 20, `全体の大きさが正しい (${info.bb.w}×${info.bb.h})`);
 
@@ -176,7 +198,7 @@ await page.evaluate(() => window.largepic.mosaic.clear());
 await startImport();
 const geo = await page.evaluate(() => {
   const r = document.querySelector('#dlgCrop canvas').getBoundingClientRect();
-  const m = window.largepic.settings.mask;
+  const m = window.largepic.settings.masks.find((q) => Math.abs(q.cx - 0.5) < 0.08 && Math.abs(q.cy - 0.5) < 0.08);
   return { l: r.left, t: r.top, w: r.width, h: r.height, cx: m.cx, cy: m.cy, rw: m.rw, rh: m.rh };
 });
 const ctr = { x: geo.l + geo.cx * geo.w, y: geo.t + (0.13 + geo.cy * 0.73) * geo.h };
@@ -186,9 +208,25 @@ const knob = { x: geo.l + (geo.cx + geo.rw) * geo.w + 40, y: geo.t + (0.13 + (ge
 await page.mouse.move(knob.x, knob.y); await page.mouse.down(); await page.mouse.move(knob.x + 20, knob.y + 12, { steps: 6 }); await page.mouse.up();
 await page.click('#maskShape [data-v=rect]');
 await finishImport();
-const mk2 = await page.evaluate(() => window.largepic.settings.mask);
+const mk2 = await page.evaluate(() => window.largepic.settings.masks.find((q) => q.shape === 'rect'));
 console.log(JSON.stringify(mk2));
 check(mk2.cx > mk.cx + 0.05 && mk2.cy > mk.cy + 0.03, `ドラッグで位置を動かせる (cx ${mk.cx.toFixed(2)} → ${mk2.cx.toFixed(2)})`);
 check(mk2.rw > mk.rw + 0.02, `●で大きさを変えられる (半径 ${(mk.rw * 390).toFixed(0)} → ${(mk2.rw * 390).toFixed(0)}px)`);
 check(mk2.shape === 'rect', '丸／四角を切り替えられる');
+// 5) 旧形式（1つだけ）の設定も引き継げる／追加・削除ができる
+await page.evaluate(() => localStorage.setItem('largepic.settings', JSON.stringify({ mask: { on: true, shape: 'rect', cx: 0.3, cy: 0.3, rw: 0.1, rh: 0.1 } })));
+await page.reload();
+if (await page.waitForSelector('#dlgRestore[open]', { timeout: 3000 }).then(() => true).catch(() => false)) await page.click('#restoreNew');
+const migrated = await page.evaluate(() => window.largepic.settings.masks);
+check(migrated.length === 1 && migrated[0].shape === 'rect' && migrated[0].cx === 0.3, '旧形式の設定（範囲が1つ）も引き継がれる');
+await page.evaluate(() => window.largepic.mosaic.clear());
+curVid = vid;
+await startImport();
+await page.click('#maskAdd'); await page.click('#maskAdd');
+await page.click('#maskDel');
+await page.click('#dlgCrop [data-ok]');
+await page.waitForSelector('#dlgProgress[open]', { timeout: 20000 }).catch(() => {});
+await page.waitForFunction(() => !document.querySelector('#dlgProgress').open || document.querySelector('#dlgLost').open || document.querySelector('#dlgConflict').open, null, { timeout: 180000, polling: 300 });
+const added = await page.evaluate(() => window.largepic.settings.masks.length);
+check(added === 2, `範囲を追加・削除できる (1 + 2 追加 − 1 削除 = ${added})`);
 await browser.close(); server.close(); process.exit(fail?1:0);

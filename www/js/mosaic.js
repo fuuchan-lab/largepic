@@ -1,6 +1,6 @@
 // 貼り合わせ中の画像（タイル）の集合
 import { perf } from './perf.js';
-import { inMask, fillTileCells } from './mask.js';
+import { inAny, fillTileCells } from './mask.js';
 import { decodeCrop, grayOf, newCanvas, canvasToBlob, isBlank } from './imageutil.js';
 
 // tile: {
@@ -81,7 +81,7 @@ export class Mosaic {
 
   covers(x, y) {
     for (const t of this.tiles) {
-      if (t.placed && x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h && !(t.mask && inMask(t.mask, x - t.x, y - t.y))) return true;
+      if (t.placed && x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h && !(t.masks && inAny(t.masks, x - t.x, y - t.y))) return true;
     }
     return false;
   }
@@ -105,7 +105,7 @@ export class Mosaic {
   // 矩形のうち、まだどのタイルにも覆われていない割合
   // 矩形のうち、どのタイルにも覆われていない面積（px²）と割合。
   // 小さな抜け（穴）も見落とさないよう、細かい格子で数える。
-  // ignore: 矩形の座標系でのマスク（新しいコマ自身の、記録しない領域）。そこは埋められないので数えない
+  // ignore: 矩形の座標系でのマスクの配列（新しいコマ自身の、記録しない領域）。そこは埋められないので数えない
   uncoveredArea(x, y, w, h, ignore = null) {
     const c = Math.max(3, Math.round(Math.min(w, h) / 160));
     const gw = Math.ceil(w / c), gh = Math.ceil(h / c);
@@ -114,10 +114,12 @@ export class Mosaic {
       if (!t.placed || t.x >= x + w || t.y >= y + h || t.x + t.w <= x || t.y + t.h <= y) continue;
       fillTileCells(g, gw, gh, x, y, c, t);
     }
-    if (ignore) {
-      for (let j = Math.max(0, Math.floor(ignore.y / c)); j < Math.min(gh, Math.ceil((ignore.y + ignore.h) / c)); j++) {
-        for (let i = Math.max(0, Math.floor(ignore.x / c)); i < Math.min(gw, Math.ceil((ignore.x + ignore.w) / c)); i++) {
-          if (inMask(ignore, (i + 0.5) * c, (j + 0.5) * c)) g[j * gw + i] = 1;
+    if (ignore && ignore.length) {
+      for (const m of ignore) {
+        for (let j = Math.max(0, Math.floor(m.y / c)); j < Math.min(gh, Math.ceil((m.y + m.h) / c)); j++) {
+          for (let i = Math.max(0, Math.floor(m.x / c)); i < Math.min(gw, Math.ceil((m.x + m.w) / c)); i++) {
+            if (inAny([m], (i + 0.5) * c, (j + 0.5) * c)) g[j * gw + i] = 1;
+          }
         }
       }
     }

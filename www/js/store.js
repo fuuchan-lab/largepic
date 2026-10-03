@@ -63,7 +63,7 @@ export class ProjectStore {
     const meta = {
       version: 1,
       nextId: this.mosaic.nextId,
-      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, mask: t.mask || null })),
+      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, masks: t.masks || null })),
     };
     const add = tiles.filter((t) => !this.saved.has(t.id));
     const del = [...this.saved].filter((id) => !ids.has(id));
@@ -128,12 +128,14 @@ export class ProjectStore {
         c.width = c.height = 0;
       }
       const gray = grayOf(bmp);
-      if (m.mask) flattenGray(gray, m.w, m.h, m.mask);   // 透明にした部分は、位置合わせ用にはならしておく
+      // 旧形式（mask が1つ）の保存データも読めるようにする
+      const ms = m.masks || (m.mask ? [m.mask] : null);
+      if (ms) flattenGray(gray, m.w, m.h, ms);   // 透明にした部分は、位置合わせ用にはならしておく
       const { bmp: thumb, scale } = await makeThumb(bmp, m.w, m.h, stitcher.settings.thumbSize);
       bmp.close?.();
       const feat = makeFeatures(gray, m.w, m.h, stitcher.scales);
       feat.full = null;
-      this.mosaic.tiles.push({ ...m, thumb, thumbScale: scale, src, feat, fullBad: bad, grayBad: bad });
+      this.mosaic.tiles.push({ ...m, masks: ms, thumb, thumbScale: scale, src, feat, fullBad: bad, grayBad: bad });
       this.saved.add(m.id);
       if (bad) this.mosaic.warn?.('一部の画像を高解像度で読み込めませんでした');
       onProgress?.(++n / meta.tiles.length);
