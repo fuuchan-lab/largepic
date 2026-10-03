@@ -164,9 +164,21 @@ function computeEdgeDensity(L, x0, y0, x1, y1) {
 
 // ---------- NCC ----------
 // b を a 座標の (dx,dy) に置いたときの重なり部分の正規化相互相関
+// 画像の一部だけを保存しているタイル用：本物の画素がある範囲（その階層の座標）を feat の各階層に記録する
+export function setValid(feat, ix, iy, iw, ih) {
+  for (const k of Object.keys(feat)) {
+    const L = feat[k];
+    if (!L || !L.data) continue;
+    const s = L.scale || 1;
+    L.valid = { x0: Math.ceil(ix * s), y0: Math.ceil(iy * s), x1: Math.floor((ix + iw) * s), y1: Math.floor((iy + ih) * s) };
+  }
+}
+
 export function ncc(A, B, dx, dy, stride = 1) {
-  const x0 = Math.max(0, dx), y0 = Math.max(0, dy);
-  const x1 = Math.min(A.w, dx + B.w), y1 = Math.min(A.h, dy + B.h);
+  let x0 = Math.max(0, dx), y0 = Math.max(0, dy);
+  let x1 = Math.min(A.w, dx + B.w), y1 = Math.min(A.h, dy + B.h);
+  if (A.valid) { x0 = Math.max(x0, A.valid.x0); y0 = Math.max(y0, A.valid.y0); x1 = Math.min(x1, A.valid.x1); y1 = Math.min(y1, A.valid.y1); }
+  if (B.valid) { x0 = Math.max(x0, B.valid.x0 + dx); y0 = Math.max(y0, B.valid.y0 + dy); x1 = Math.min(x1, B.valid.x1 + dx); y1 = Math.min(y1, B.valid.y1 + dy); }
   if (x1 - x0 < 4 || y1 - y0 < 4) return { score: -1, overlap: 0 };
   const a = A.data, b = B.data, aw = A.w, bw = B.w;
   let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;

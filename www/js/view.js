@@ -1,3 +1,4 @@
+import { imgRect } from './mosaic.js';
 // モザイクの表示と、指・マウスでの操作（パン／ピンチ／タイルのドラッグ）
 
 const bgColors = { black: '#000', gray: '#333', white: '#f5f5f5' };
@@ -29,7 +30,8 @@ export function drawOverview(canvas, mosaic, { viewRect, liveRect, lost, region,
   const ox = (cw - bb.w * s) / 2 - bb.x * s, oy = (ch - bb.h * s) / 2 - bb.y * s;
   const pb = mosaic.bbox();
   for (const t of mosaic.tiles) {
-    ctx.drawImage(t.thumb, ox + t.x * s, oy + t.y * s, t.w * s, t.h * s);
+    const r = imgRect(t);
+    ctx.drawImage(t.thumb, ox + r.x * s, oy + r.y * s, r.w * s, r.h * s);
     if (!t.placed) {
       ctx.strokeStyle = '#ff4d4d'; ctx.lineWidth = 1.5;
       ctx.strokeRect(ox + t.x * s, oy + t.y * s, t.w * s, t.h * s);
@@ -138,11 +140,12 @@ export class View {
       if (s * dpr > t.thumbScale * 1.15) img = mosaic.getFullCached(t) || t.thumb;
       ctx.globalAlpha = t.placed ? 1 : 0.85;
       try {
-        ctx.drawImage(img, sx(t.x), sy(t.y), t.w * s, t.h * s);
+        const r = imgRect(t);
+        ctx.drawImage(img, sx(r.x), sy(r.y), r.w * s, r.h * s);
       } catch (e) {
         // 閉じられた画像など。サムネイルで描き直し、それもだめならこのタイルだけ飛ばす
         mosaic.cache.delete(t.id);
-        try { ctx.drawImage(t.thumb, sx(t.x), sy(t.y), t.w * s, t.h * s); } catch { /* skip */ }
+        try { const r = imgRect(t); ctx.drawImage(t.thumb, sx(r.x), sy(r.y), r.w * s, r.h * s); } catch { /* skip */ }
       }
       ctx.globalAlpha = 1;
       if (!t.placed) {

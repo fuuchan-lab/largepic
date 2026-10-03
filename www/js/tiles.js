@@ -4,6 +4,7 @@
 //     L1/…, L2/… … 1/2, 1/4, … に縮小したタイル（全体を速く表示するため）
 //   ZIP なので、ふつうのアプリで展開してタイル画像をそのまま取り出すこともできる。
 import { newCanvas, canvasToBlob, decodeBitmap } from './imageutil.js';
+import { imgRect } from './mosaic.js';
 
 export const TILE_FORMAT = 'largepic-tiles';
 
@@ -151,7 +152,7 @@ export async function exportTiles(mosaic, {
 
   // --- レベル 0：元の解像度（PNG、劣化なし） ---
   const tiles = mosaic.placed().filter((t) =>
-    t.x < bb.x + bb.w && t.y < bb.y + bb.h && t.x + t.w > bb.x && t.y + t.h > bb.y);
+    imgRect(t).x < bb.x + bb.w && imgRect(t).y < bb.y + bb.h && imgRect(t).x + imgRect(t).w > bb.x && imgRect(t).y + imgRect(t).h > bb.y);
   const decoded = new Map();
   const bitmapOf = async (t) => {
     if (decoded.has(t.id)) { const v = decoded.get(t.id); decoded.delete(t.id); decoded.set(t.id, v); return v; }
@@ -172,8 +173,9 @@ export async function exportTiles(mosaic, {
       const x0 = tx * T, y0 = ty * T, tw = Math.min(T, W - x0), th = Math.min(T, H - y0);
       // このタイルに重なる元画像
       const over = tiles.filter((t) => {
-        const a = (t.x - bb.x) * scale, b = (t.y - bb.y) * scale;
-        return a < x0 + tw && b < y0 + th && a + t.w * scale > x0 && b + t.h * scale > y0;
+        const r = imgRect(t);
+        const a = (r.x - bb.x) * scale, b = (r.y - bb.y) * scale;
+        return a < x0 + tw && b < y0 + th && a + r.w * scale > x0 && b + r.h * scale > y0;
       });
       if (!over.length && skipEmpty(x0, y0, tw, th)) { tick(); continue; }
       const c = newCanvas(tw, th);
@@ -189,8 +191,9 @@ export async function exportTiles(mosaic, {
       for (const t of over) {
         const bmp = await bitmapOf(t);
         // 隣のタイルとの境目に隙間ができないよう、座標は整数にそろえて描く
-        const dx = Math.round((t.x - bb.x) * scale) - x0, dy = Math.round((t.y - bb.y) * scale) - y0;
-        ctx.drawImage(bmp, dx, dy, Math.round(t.w * scale), Math.round(t.h * scale));
+        const r = imgRect(t);
+        const dx = Math.round((r.x - bb.x) * scale) - x0, dy = Math.round((r.y - bb.y) * scale) - y0;
+        ctx.drawImage(bmp, dx, dy, Math.round(r.w * scale), Math.round(r.h * scale));
       }
       if (circle) ctx.restore();
       const blob = await canvasToBlob(c, 'image/png');

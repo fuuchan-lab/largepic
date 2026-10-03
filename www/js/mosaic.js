@@ -1,6 +1,11 @@
 // 貼り合わせ中の画像（タイル）の集合
 import { perf } from './perf.js';
 import { inAny, fillTileCells } from './mask.js';
+import { grayPadded } from './imageutil.js';
+import { setValid } from './register.js';
+
+// 保存してある画像の範囲（モザイクの座標）。フレームの一部だけを保存したタイルは、フレームより小さい
+export const imgRect = (t) => ({ x: t.x + (t.ix || 0), y: t.y + (t.iy || 0), w: t.iw ?? t.w, h: t.ih ?? t.h });
 import { decodeCrop, grayOf, newCanvas, canvasToBlob, isBlank } from './imageutil.js';
 
 // tile: {
@@ -72,8 +77,9 @@ export class Mosaic {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const t of this.tiles) {
       if (!all && !t.placed) continue;
-      x0 = Math.min(x0, t.x); y0 = Math.min(y0, t.y);
-      x1 = Math.max(x1, t.x + t.w); y1 = Math.max(y1, t.y + t.h);
+      const r = imgRect(t);
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y);
+      x1 = Math.max(x1, r.x + r.w); y1 = Math.max(y1, r.y + r.h);
     }
     if (x0 === Infinity) return null;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
@@ -81,7 +87,9 @@ export class Mosaic {
 
   covers(x, y) {
     for (const t of this.tiles) {
-      if (t.placed && x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h && !(t.masks && inAny(t.masks, x - t.x, y - t.y))) return true;
+      if (!t.placed) continue;
+      const r = imgRect(t);
+      if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h && !(t.masks && inAny(t.masks, x - t.x, y - t.y))) return true;
     }
     return false;
   }
@@ -111,7 +119,9 @@ export class Mosaic {
     const gw = Math.ceil(w / c), gh = Math.ceil(h / c);
     const g = new Uint8Array(gw * gh);
     for (const t of this.tiles) {
-      if (!t.placed || t.x >= x + w || t.y >= y + h || t.x + t.w <= x || t.y + t.h <= y) continue;
+      if (!t.placed) continue;
+      const r = imgRect(t);
+      if (r.x >= x + w || r.y >= y + h || r.x + r.w <= x || r.y + r.h <= y) continue;
       fillTileCells(g, gw, gh, x, y, c, t);
     }
     if (ignore && ignore.length) {
@@ -127,6 +137,35 @@ export class Mosaic {
     for (let k = 0; k < g.length; k++) if (!g[k]) miss++;
     const area = miss * c * c;
     return { area, frac: miss / g.length };
+  }
+
+  // 新しいフレーム (x, y, w, h) のうち、まだどのタイルにも覆われていない部分を囲む長方形（フレームの座標）。
+  // その部分だけを保存すれば足りる。ほとんど全部が新しいとき（8割以上）や、判定できないときは null（全体を保存）。
+  newRegion(x, y, w, h, ignore = null) {
+    const c = Math.max(4, Math.round(Math.min(w, h) / 120));
+    const gw = Math.ceil(w / c), gh = Math.ceil(h / c);
+    const g = new Uint8Array(gw * gh);
+    for (const t of this.tiles) {
+      if (!t.placed) continue;
+      const r = imgRect(t);
+      if (r.x >= x + w || r.y >= y + h || r.x + r.w <= x || r.y + r.h <= y) continue;
+      fillTileCells(g, gw, gh, x, y, c, t);
+    }
+    if (ignore && ignore.length) {
+      for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) if (inAny(ignore, (i + 0.5) * c, (j + 0.5) * c)) g[j * gw + i] = 1;
+    }
+    let i0 = gw, j0 = gh, i1 = -1, j1 = -1, miss = 0;
+    for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+      if (g[j * gw + i]) continue;
+      miss++;
+      if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; if (j > j1) j1 = j;
+    }
+    if (!miss) return null;
+    const pad = Math.ceil(c * 1.5) + 4;   // 隣との境目に隙間があかないよう、少し広めに
+    const rx = Math.max(0, i0 * c - pad), ry = Math.max(0, j0 * c - pad);
+    const rw = Math.min(w, (i1 + 1) * c + pad) - rx, rh = Math.min(h, (j1 + 1) * c + pad) - ry;
+    if (rw * rh > 0.8 * w * h) return null;
+    return { x: Math.floor(rx), y: Math.floor(ry), w: Math.ceil(rw), h: Math.ceil(rh) };
   }
 
   uncoveredFraction(x, y, w, h) {
@@ -149,7 +188,7 @@ export class Mosaic {
   }
 
   // ---- フル解像度 ----
-  loadFull(tile) { return decodeCrop(tile.src, tile.sx, tile.sy, tile.w, tile.h); }
+  loadFull(tile) { return decodeCrop(tile.src, tile.sx, tile.sy, tile.iw ?? tile.w, tile.ih ?? tile.h); }
 
   getFullCached(tile) {
     if (tile.fullBad) return null;
@@ -196,7 +235,9 @@ export class Mosaic {
         tile.grayBad = true; tile.fullBad = true;
         this.warn?.('一部の画像を高解像度で読み込めませんでした');
       } else {
-        tile.feat.full = { data: grayOf(bmp), w: tile.w, h: tile.h, scale: 1 };
+        // 位置合わせの座標はフレーム全体にそろえる（フレームの一部だけ保存しているタイルは、保存していない所をならす）
+        tile.feat.full = { data: grayPadded(bmp, tile.w, tile.h, tile.ix || 0, tile.iy || 0), w: tile.w, h: tile.h, scale: 1 };
+        if (tile.iw != null && (tile.iw !== tile.w || tile.ih !== tile.h)) setValid({ f: tile.feat.full }, tile.ix || 0, tile.iy || 0, tile.iw, tile.ih);
       }
       if (!this.cache.has(tile.id)) bmp.close?.();
     }
@@ -230,12 +271,13 @@ export class Mosaic {
     if (background !== 'transparent') { ctx.fillStyle = background; ctx.fillRect(0, 0, W, H); }
     ctx.imageSmoothingQuality = 'high';
     const tiles = this.placed().filter((t) =>
-      t.x < bb.x + bb.w && t.y < bb.y + bb.h && t.x + t.w > bb.x && t.y + t.h > bb.y);
+      imgRect(t).x < bb.x + bb.w && imgRect(t).y < bb.y + bb.h && imgRect(t).x + imgRect(t).w > bb.x && imgRect(t).y + imgRect(t).h > bb.y);
     for (let i = 0; i < tiles.length; i++) {
       const t = tiles[i];
       const useThumb = scale <= t.thumbScale;
       const bmp = useThumb ? t.thumb : (this.cache.get(t.id) || await this.loadFull(t));
-      ctx.drawImage(bmp, (t.x - bb.x) * scale, (t.y - bb.y) * scale, t.w * scale, t.h * scale);
+      const r = imgRect(t);
+      ctx.drawImage(bmp, (r.x - bb.x) * scale, (r.y - bb.y) * scale, r.w * scale, r.h * scale);
       if (!useThumb && !this.cache.has(t.id)) bmp.close?.();
       onProgress?.((i + 1) / tiles.length);
     }

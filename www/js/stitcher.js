@@ -1,6 +1,6 @@
 // 新しい画像（フレーム）をモザイクのどこに置くかを決める
 import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, ncc, scalesFor } from './register.js';
-import { makeThumb, canvasToBlob, nextFrame } from './imageutil.js';
+import { makeThumb, canvasToBlob, nextFrame, newCanvas } from './imageutil.js';
 import { perf } from './perf.js';
 import { punchMask } from './mask.js';
 
@@ -23,16 +23,26 @@ export class Stitcher {
   }
 
   // frame.canvas の内容からタイルを作る。srcBlob があればそれを元画像として使う
-  async makeTile(frame, feat, srcBlob, x, y, placed) {
+  // region: フレームのうち保存する範囲（フレームの座標）。省略すると全体。すでに取り込み済みの部分は保存しない
+  async makeTile(frame, feat, srcBlob, x, y, placed, region = null) {
     let src = srcBlob, sx = frame.rect.sx, sy = frame.rect.sy;
     // 記録しない領域（ポインターやキャラクターなど）は、画像を透明にして残す。元のファイルは使えないので PNG にし直す
     if (frame.masks && frame.masks.length) { punchMask(frame.canvas.getContext('2d'), frame.masks); src = null; }
+    if (region) src = null;
+    let canvas = frame.canvas, iw = frame.w, ih = frame.h;
+    if (region) {
+      canvas = newCanvas(region.w, region.h);
+      canvas.getContext('2d').drawImage(frame.canvas, region.x, region.y, region.w, region.h, 0, 0, region.w, region.h);
+      iw = region.w; ih = region.h;
+    }
     if (!src) {
-      src = await perf.time('tile.png', () => canvasToBlob(frame.canvas, 'image/png', 1));
+      src = await perf.time('tile.png', () => canvasToBlob(canvas, 'image/png', 1));
       sx = 0; sy = 0;
     }
-    const { bmp, scale } = await perf.time('tile.thumb', () => makeThumb(frame.canvas, frame.w, frame.h, this.settings.thumbSize));
+    const { bmp, scale } = await perf.time('tile.thumb', () => makeThumb(canvas, iw, ih, this.settings.thumbSize));
+    if (region) canvas.width = canvas.height = 0;
     const tile = { x, y, w: frame.w, h: frame.h, placed, thumb: bmp, thumbScale: scale, src, sx, sy, feat, masks: frame.masks && frame.masks.length ? frame.masks : null };
+    if (region) Object.assign(tile, { ix: region.x, iy: region.y, iw: region.w, ih: region.h });
     this.mosaic.add(tile);
     this.mosaic.touchFullGray(tile);
     return tile;
@@ -141,7 +151,7 @@ export class Stitcher {
     const order = [...placed].sort((a, b) => b.id - a.id); // 新しい順
     const hit = await this.locate(feat, order);
     if (hit) {
-      await this.makeTile(frame, feat, srcBlob, hit.x, hit.y, true);
+      await this.makeTile(frame, feat, srcBlob, hit.x, hit.y, true, this.mosaic.newRegion(hit.x, hit.y, frame.w, frame.h, frame.masks));
       return 'placed';
     }
     const bb = this.mosaic.bbox(true);
@@ -393,7 +403,9 @@ export class Tracker {
         const bad = st.conflictAt(feat, this.pos.x, this.pos.y);
         if (bad) return { state: 'conflict', rect: rectAt(this.pos), score: bad.score };
       }
-      const tile = await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true);
+      // すでに取り込み済みの部分は保存しない（新しい部分だけを画像にする）
+      const region = this.mosaic.newRegion(this.pos.x, this.pos.y, frame.w, frame.h, frame.masks);
+      const tile = await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true, region);
       tile.conf = conf;
       tile.vt = opts.vt;  // 動画の時刻（デバッグ用）
       tile.weak = conf < 0.7 || !fix && this.mosaic.placed().length > 1 && unc < 0.9; // 既存タイルで確かめられなかった

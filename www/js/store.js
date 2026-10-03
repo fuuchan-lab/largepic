@@ -1,7 +1,7 @@
 // 作業中のプロジェクトを端末内 (IndexedDB) に自動保存する
 // 撮影のために他のアプリへ切り替えている間にページが閉じられても、続きから再開できる
-import { decodeCrop, decodeBitmap, grayOf, makeThumb, isBlank, newCanvas, canvasToBlob } from './imageutil.js';
-import { makeFeatures, scalesFor } from './register.js';
+import { decodeCrop, decodeBitmap, grayPadded, makeThumb, isBlank, newCanvas, canvasToBlob } from './imageutil.js';
+import { makeFeatures, scalesFor, setValid } from './register.js';
 import { flattenGray } from './mask.js';
 
 const DB = 'largepic';
@@ -63,7 +63,7 @@ export class ProjectStore {
     const meta = {
       version: 1,
       nextId: this.mosaic.nextId,
-      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, masks: t.masks || null })),
+      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, ix: t.ix, iy: t.iy, iw: t.iw, ih: t.ih, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, masks: t.masks || null })),
     };
     const add = tiles.filter((t) => !this.saved.has(t.id));
     const del = [...this.saved].filter((id) => !ids.has(id));
@@ -114,27 +114,29 @@ export class ProjectStore {
       const preview = await req(os.get('p' + m.id));
       let bad = false;
       let bmp = null;
-      try { bmp = await decodeCrop(src, m.sx, m.sy, m.w, m.h); } catch { /* 下で代替 */ }
+      const iw = m.iw ?? m.w, ih = m.ih ?? m.h;   // フレームの一部だけを保存したタイルは、その大きさ
+      try { bmp = await decodeCrop(src, m.sx, m.sy, iw, ih); } catch { /* 下で代替 */ }
       if (!bmp || isBlank(bmp)) {
         // 元画像を読み込めない（真っ黒）→ プレビューから復元して位置合わせは粗い解像度で行う
         bmp?.close?.();
         bad = true;
         if (!preview) continue;
         const pv = await decodeBitmap(preview);
-        const c = newCanvas(m.w, m.h);
-        c.getContext('2d').drawImage(pv, 0, 0, m.w, m.h);
+        const c = newCanvas(iw, ih);
+        c.getContext('2d').drawImage(pv, 0, 0, iw, ih);
         pv.close?.();
         bmp = await createImageBitmap(c);
         c.width = c.height = 0;
       }
-      const gray = grayOf(bmp);
+      const gray = grayPadded(bmp, m.w, m.h, m.ix || 0, m.iy || 0);
       // 旧形式（mask が1つ）の保存データも読めるようにする
       const ms = m.masks || (m.mask ? [m.mask] : null);
       if (ms) flattenGray(gray, m.w, m.h, ms);   // 透明にした部分は、位置合わせ用にはならしておく
-      const { bmp: thumb, scale } = await makeThumb(bmp, m.w, m.h, stitcher.settings.thumbSize);
+      const { bmp: thumb, scale } = await makeThumb(bmp, iw, ih, stitcher.settings.thumbSize);
       bmp.close?.();
       const feat = makeFeatures(gray, m.w, m.h, stitcher.scales);
       feat.full = null;
+      if (m.iw != null && (m.iw !== m.w || m.ih !== m.h)) setValid(feat, m.ix || 0, m.iy || 0, m.iw, m.ih);
       this.mosaic.tiles.push({ ...m, masks: ms, thumb, thumbScale: scale, src, feat, fullBad: bad, grayBad: bad });
       this.saved.add(m.id);
       if (bad) this.mosaic.warn?.('一部の画像を高解像度で読み込めませんでした');

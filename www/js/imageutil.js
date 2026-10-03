@@ -53,6 +53,19 @@ export function grayOf(bitmap) {
   return g;
 }
 
+// 保存してある画像（フレームの一部 (ix, iy, 幅×高さ)）から、フレーム全体の大きさの濃淡画像を作る。
+// 保存していない部分は、保存してある部分の平均でならす（位置合わせの座標をフレーム全体にそろえるため）
+export function grayPadded(bitmap, fw, fh, ix = 0, iy = 0) {
+  const g = grayOf(bitmap);
+  const iw = bitmap.width, ih = bitmap.height;
+  if (ix === 0 && iy === 0 && iw === fw && ih === fh) return g;
+  let s = 0; for (let i = 0; i < g.length; i += 7) s += g[i];
+  const mean = Math.round(s / Math.ceil(g.length / 7));
+  const out = new Uint8Array(fw * fh).fill(mean);
+  for (let y = 0; y < ih; y++) out.set(g.subarray(y * iw, (y + 1) * iw), (iy + y) * fw + ix);
+  return out;
+}
+
 export async function makeThumb(canvas, w, h, maxDim = 640) {
   const s = Math.min(1, maxDim / Math.max(w, h));
   const tw = Math.max(1, Math.round(w * s)), th = Math.max(1, Math.round(h * s));

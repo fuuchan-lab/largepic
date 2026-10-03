@@ -93,8 +93,10 @@ export function punchMask(ctx, ms) {
 // タイル t を、格子（原点 (ox,oy)、セル cell）に塗る。t.masks（タイルの座標のマスク）の中は塗らない。
 // g は Uint8Array(gw*gh)
 export function fillTileCells(g, gw, gh, ox, oy, cell, t) {
-  const i0 = Math.max(0, Math.ceil((t.x - ox) / cell - 0.5)), i1 = Math.min(gw - 1, Math.floor((t.x + t.w - ox) / cell - 0.5));
-  const j0 = Math.max(0, Math.ceil((t.y - oy) / cell - 0.5)), j1 = Math.min(gh - 1, Math.floor((t.y + t.h - oy) / cell - 0.5));
+  // 保存してある画像の範囲（フレームの一部だけ保存していることがある）。マスクはフレームの座標
+  const rx = t.x + (t.ix || 0), ry = t.y + (t.iy || 0), rw = t.iw ?? t.w, rh = t.ih ?? t.h;
+  const i0 = Math.max(0, Math.ceil((rx - ox) / cell - 0.5)), i1 = Math.min(gw - 1, Math.floor((rx + rw - ox) / cell - 0.5));
+  const j0 = Math.max(0, Math.ceil((ry - oy) / cell - 0.5)), j1 = Math.min(gh - 1, Math.floor((ry + rh - oy) / cell - 0.5));
   if (i1 < i0 || j1 < j0) return;
   for (let j = j0; j <= j1; j++) {
     const row = j * gw;

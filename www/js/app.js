@@ -17,7 +17,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.11';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.12';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
