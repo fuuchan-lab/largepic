@@ -1,6 +1,7 @@
 import { Mosaic } from './mosaic.js';
 import { View, drawOverview } from './view.js';
 import { Stitcher, Tracker } from './stitcher.js';
+import { analyzeVideo, selectKeyframes } from './analyze.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -222,25 +223,66 @@ async function addVideo(file) {
     const tracker = new Tracker(stitcher);
     prog.open(wasEmpty ? '動画からつなげています…' : '追加の動画を取り込んでいます…');
     const step = settings.videoStep;
-    const times = [];
-    for (let t = start; t < end - step / 2; t += step) times.push(t);
-    times.push(Math.max(start, end - 0.05));
     let fitted = !wasEmpty;
     let stopped = null;
-    for (let i = 0; i < times.length; i++) {
-      const t = times[i];
-      if (prog.cancelled) break;
-      await seek(video, t);
-      const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
-      const r = await tracker.process(frame, { final: i === times.length - 1 });
-      if (r.state === 'transform') { stopped = { r, t }; break; }
-      if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
-      liveRect = r.rect; liveLost = r.state === 'lost';
-      const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
-        : liveLost ? ' ・ 位置を探しています（取り込み済みの場所が映るまで待機）' : '';
-      prog.set((t - start) / Math.max(0.01, end - start),
-        `${(t - start).toFixed(1)} / ${(end - start).toFixed(1)} 秒 ・ 取り込み ${tracker.stats.added}枚${msg}`);
-      await nextFrame();
+
+    // 1) 事前解析：縮小した画像でスクロールの経路をたどり、取り込むコマ（キーフレーム）だけを選ぶ
+    let keys = null;
+    try {
+      if (settings.fullScan) throw new Error('全コマ方式（設定）');
+      prog.set(0, '動画を解析しています…');
+      const plan = await analyzeVideo(video, crop, {
+        start, end, step: Math.min(0.12, step), threshold: settings.threshold,
+        onProgress: (p) => prog.set(p * 0.4, `動画を解析しています… ${Math.round(p * 100)}%`),
+        isCancelled: () => prog.cancelled,
+      });
+      if (!prog.cancelled && plan.samples.length >= 3 && plan.brokenFraction < 0.5) {
+        keys = selectKeyframes(plan);
+        console.log(`解析(${plan.mode}): ${plan.samples.length}コマ → キーフレーム ${keys.length}`);
+        if (keys.length < 2) keys = null;
+      }
+    } catch (err) {
+      console.warn('解析に失敗。全コマ方式に切り替えます', err);
+    }
+
+    if (keys) {
+      // 2) 選んだコマだけを高解像度で取り込む（解析で分かった移動量を位置合わせのヒントに使う）
+      for (let i = 0; i < keys.length; i++) {
+        if (prog.cancelled) break;
+        const k = keys[i], pk = keys[i - 1];
+        await seek(video, k.t);
+        const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
+        const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
+        const r = await tracker.process(frame, { hint, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
+        if (r.state === 'transform') { stopped = { r, t: k.t }; break; }
+        if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
+        liveRect = r.rect; liveLost = r.state === 'lost';
+        const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
+          : liveLost ? ' ・ 位置を探しています（取り込み済みの場所が映るまで待機）' : '';
+        prog.set(0.4 + 0.6 * (i + 1) / keys.length,
+          `取り込み ${i + 1} / ${keys.length} コマ ・ 追加 ${tracker.stats.added}枚${msg}`);
+        await nextFrame();
+      }
+    } else {
+      // 解析できなかったときは、一定間隔で全コマを調べる（従来の方式）
+      const times = [];
+      for (let t = start; t < end - step / 2; t += step) times.push(t);
+      times.push(Math.max(start, end - 0.05));
+      for (let i = 0; i < times.length; i++) {
+        const t = times[i];
+        if (prog.cancelled) break;
+        await seek(video, t);
+        const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
+        const r = await tracker.process(frame, { final: i === times.length - 1 });
+        if (r.state === 'transform') { stopped = { r, t }; break; }
+        if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
+        liveRect = r.rect; liveLost = r.state === 'lost';
+        const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
+          : liveLost ? ' ・ 位置を探しています（取り込み済みの場所が映るまで待機）' : '';
+        prog.set((t - start) / Math.max(0.01, end - start),
+          `${(t - start).toFixed(1)} / ${(end - start).toFixed(1)} 秒 ・ 取り込み ${tracker.stats.added}枚${msg}`);
+        await nextFrame();
+      }
     }
     liveRect = null;
     view.fit();

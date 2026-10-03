@@ -183,7 +183,7 @@ export class Tracker {
       } else { this.chain = 0; this.chainMove = 0; }
       this.cand = feat;
       const small = Math.min(frame.w, frame.h);
-      if (!(opts.final || opts.immediate || (this.chain >= 2 && this.chainMove > small * 0.03))) {
+      if (!(opts.final || opts.immediate || opts.key || (this.chain >= 2 && this.chainMove > small * 0.03))) {
         return { state: 'waiting', rect: null };
       }
       await st.makeTile(frame, feat, null, 0, 0, true);
@@ -192,11 +192,13 @@ export class Tracker {
       return { state: 'added', rect: rectAt(this.pos) };
     }
 
+    if (opts.newSeg) { this.lost = true; this.ref = null; this.vel = null; }  // 解析で途切れた所：取り込み済みの場所から探し直す
     let motion = Infinity;
     if (!this.lost && this.ref) {
       const small = Math.min(frame.w, frame.h);
-      const fastScroll = this.vel && Math.hypot(this.vel.dx, this.vel.dy) > small * 0.1;
-      const r = register(this.ref, feat, { hint: this.vel || undefined, fastScroll });
+      const hint = opts.hint || this.vel || undefined;
+      const fastScroll = hint && Math.hypot(hint.dx, hint.dy) > small * 0.1;
+      const r = register(this.ref, feat, { hint, fastScroll });
       if (r && r.score >= st.threshold) {
         motion = Math.hypot(r.dx, r.dy);
         this.vel = { dx: r.dx, dy: r.dy };
@@ -220,7 +222,7 @@ export class Tracker {
       if (!hit) {
         this.stats.lost++;
         // 取り込み済みの場所のはずなのに合わない：拡大率や向きが違う可能性（3コマに1回調べる）
-        if (this.tf.lostFrames++ % 3 === 0) {
+        if (opts.key || this.tf.lostFrames++ % 3 === 0) {
           for (const t of order.slice(0, 2)) if (this.checkTransform(t.feat, feat)) return this.transformResult(rectAt(this.pos));
         }
         return { state: 'lost', rect: rectAt(this.pos) };
@@ -239,6 +241,7 @@ export class Tracker {
     // 止まったコマ：少しでも新しければ取り込む／速く動いているコマ：かなり欠けるまで待つ
     let need = this.addThreshold;
     if (opts.final) need = 0.005;
+    else if (opts.key) need = Math.min(need, 0.12);  // 事前解析で選んだコマ：新しい範囲が少しでもあれば取り込む
     else if (still) need = Math.min(0.02, need);
     else if (fast) need = Math.max(need, 0.45);
     if (unc > need) {

@@ -120,3 +120,6 @@ button.big { padding: 13px 16px; font-size: 16px; }
 .help-dlg ul.help { padding-left: 1.2em; }
 .range[hidden] { display: none; }
 .range label { margin: 8px 0; }
+
+/* 取り込み用の動画要素：見えないが描画はされる（requestVideoFrameCallback のため） */
+.probe { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0.01; pointer-events: none; }

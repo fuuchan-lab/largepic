@@ -26,7 +26,7 @@ const url = `http://localhost:${server.address().port}/`;
 const browser = await chromium.launch({ executablePath: process.env.CHROME || undefined });
 const page = await browser.newPage({ viewport: { width: 420, height: 860 }, deviceScaleFactor: 2 });
 page.on('pageerror', (e) => console.log('PAGEERROR', e.message));
-page.on('console', (m) => { if (m.type() === 'error') console.log('CONSOLE', m.text()); });
+page.on('console', (m) => { if (m.text().startsWith('解析') || m.type() === 'error') console.log('CONSOLE', m.text()); });
 await page.goto(url);
 
 // 疑似地図（世界）を作り、指定位置の「スクショ」を PNG で返す関数をページに置く
