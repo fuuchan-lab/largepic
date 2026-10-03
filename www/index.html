@@ -33,7 +33,7 @@
       <button class="primary big" data-action="capture">● 撮影をはじめる</button>
       <button data-action="images">スクリーンショットから作る</button>
     </div>
-    <p class="hint"><a href="#" data-action="help">撮影のコツを見る</a></p>
+    <p class="hint"><a href="#" data-action="help">撮影のコツを見る</a> ・ <a href="#" data-action="viewer">保存した大きな画像を見る</a></p>
   </div>
 
   <button id="btnFill" class="fill-chip" hidden>不足部分を追加撮影</button>
@@ -69,6 +69,7 @@
 <nav class="tools">
   <button data-action="capture" class="rec-btn"><span class="ic">●</span><span>撮影</span></button>
   <button data-action="images"><span class="ic">＋</span><span>画像</span></button>
+  <button id="btnViewer"><span class="ic">🔍</span><span>閲覧</span></button>
   <button id="btnAdjust"><span class="ic">✥</span><span>調整</span></button>
   <button id="btnUndo"><span class="ic">↶</span><span>戻す</span></button>
   <button id="btnFit"><span class="ic">⤢</span><span>全体</span></button>
@@ -77,6 +78,7 @@
 </nav>
 
 <input type="file" id="fileImages" accept="image/*" multiple hidden>
+<input type="file" id="fileView" accept="image/*" hidden>
 <input type="file" id="fileVideo" accept="video/*" hidden>
 <video id="video" class="probe" muted playsinline preload="auto"></video>
 
@@ -171,6 +173,7 @@
     <div class="row">
       <a id="expDownload" class="button primary" download>ダウンロード</a>
       <button id="expShare" hidden>共有 / 写真に保存</button>
+      <button id="expView">ビューアで見る</button>
     </div>
   </div>
   <div class="row end">
@@ -290,6 +293,24 @@
     <button id="restoreGo" class="primary">続きから</button>
   </div>
 </dialog>
+
+<!-- 大きな画像のビューア -->
+<div id="viewer" class="viewer" hidden>
+  <canvas id="viewerCanvas"></canvas>
+  <div class="viewer-top">
+    <button id="viewerClose">✕ 閉じる</button>
+    <button id="viewerOpen">別の画像を開く</button>
+    <span id="viewerInfo" class="viewer-info"></span>
+  </div>
+  <div class="viewer-ctl">
+    <button id="viewerZoomIn" aria-label="拡大">＋</button>
+    <button id="viewerZoomOut" aria-label="縮小">－</button>
+    <button id="viewerFit">全体</button>
+    <button id="viewer100">等倍</button>
+  </div>
+  <div id="viewerLoading" class="viewer-loading" hidden>読み込み中…</div>
+  <div id="viewerHint" class="viewer-hint">ドラッグで移動 ・ ピンチ / ホイールで拡大縮小 ・ ダブルタップで拡大</div>
+</div>
 
 <script type="module" src="js/app.js"></script>
 </body>

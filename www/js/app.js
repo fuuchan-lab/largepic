@@ -2,6 +2,7 @@ import { Mosaic } from './mosaic.js';
 import { View, drawOverview } from './view.js';
 import { Stitcher, Tracker } from './stitcher.js';
 import { analyzeVideo, selectKeyframes } from './analyze.js';
+import { ImageViewer } from './viewer.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -580,6 +581,7 @@ document.querySelectorAll('[data-action]').forEach((b) => {
     if (busy) return toast('処理中です');
     if (a === 'capture') openCapture(mosaic.tiles.length > 0 && coverage < 0.995);
     if (a === 'images') $('#fileImages').click();
+    if (a === 'viewer') $('#fileView').click();
   });
 });
 $('#fileImages').onchange = (e) => { const f = [...e.target.files]; e.target.value = ''; addImages(f); };
@@ -756,6 +758,44 @@ $('#expShare').onclick = async () => {
   try { await navigator.share({ files: [lastFile] }); } catch { /* キャンセル */ }
 };
 
+// ---------- ビューア（保存した大きな画像を地図のように見る）----------
+const viewer = new ImageViewer($('#viewerCanvas'), (st) => {
+  const pct = Math.round(st.sEff * 100);
+  $('#viewerInfo').innerHTML = `${st.w.toLocaleString()} × ${st.h.toLocaleString()} px<br>${pct}%`;
+});
+let hintTimer = 0;
+async function openViewer(blob) {
+  $('#viewer').hidden = false;
+  $('#viewerLoading').hidden = false;
+  $('#viewerHint').classList.remove('off');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => $('#viewerHint').classList.add('off'), 4000);
+  try {
+    await viewer.load(blob);
+  } catch (err) {
+    console.error(err);
+    toast('画像を開けませんでした（形式またはサイズが大きすぎる可能性があります）', 5000);
+    closeViewer();
+    return;
+  } finally {
+    $('#viewerLoading').hidden = true;
+  }
+}
+function closeViewer() {
+  viewer.dispose();
+  $('#viewer').hidden = true;
+}
+$('#btnViewer').onclick = () => $('#fileView').click();
+$('#fileView').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openViewer(f); };
+$('#viewerClose').onclick = closeViewer;
+$('#viewerOpen').onclick = () => $('#fileView').click();
+$('#viewerZoomIn').onclick = () => viewer.zoomBy(1.6);
+$('#viewerZoomOut').onclick = () => viewer.zoomBy(1 / 1.6);
+$('#viewerFit').onclick = () => viewer.fit();
+$('#viewer100').onclick = () => viewer.actualSize();
+$('#expView').onclick = () => { if (lastFile) { $('#dlgExport').close(); openViewer(lastFile); } };
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#viewer').hidden) closeViewer(); });
+
 // ---------- 起動 ----------
 async function boot() {
   updateStats();
@@ -794,4 +834,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:' && !isNative)
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 // テスト・デバッグ用
-window.largepic = { mosaic, view, stitcher, settings, store, trim, computeTrim };
+window.largepic = { mosaic, view, stitcher, settings, store, trim, computeTrim, viewer };
