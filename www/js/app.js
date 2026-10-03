@@ -79,6 +79,8 @@ function drawMini() {
 }
 view.onViewChange = drawMini;
 
+let warned = 0;
+mosaic.warn = (msg) => { if (Date.now() - warned > 8000) { warned = Date.now(); toast(msg, 5000); } };
 mosaic.onChange((kind) => {
   if (kind !== 'redraw') { updateStats(); store.schedule(); }
   view.draw();

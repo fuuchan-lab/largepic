@@ -1,5 +1,5 @@
 // 貼り合わせ中の画像（タイル）の集合
-import { decodeCrop, grayOf, newCanvas, canvasToBlob } from './imageutil.js';
+import { decodeCrop, grayOf, newCanvas, canvasToBlob, isBlank } from './imageutil.js';
 
 // tile: {
 //   id, x, y, w, h,          … モザイク座標（px）とサイズ
@@ -111,6 +111,7 @@ export class Mosaic {
   loadFull(tile) { return decodeCrop(tile.src, tile.sx, tile.sy, tile.w, tile.h); }
 
   getFullCached(tile) {
+    if (tile.fullBad) return null;
     const b = this.cache.get(tile.id);
     if (b) {
       this.cache.delete(tile.id);
@@ -127,6 +128,14 @@ export class Mosaic {
     this.loadFull(tile).then((bmp) => {
       this.loading.delete(tile.id);
       if (!this.tiles.includes(tile)) { bmp.close?.(); return; }
+      if (isBlank(bmp)) {
+        // 保存した画像の読み込みに失敗（真っ黒）。サムネイルで表示を続ける
+        bmp.close?.();
+        tile.fullBad = true;
+        this.warn?.('一部の画像を高解像度で読み込めませんでした');
+        this.changed('redraw');
+        return;
+      }
       this.cache.set(tile.id, bmp);
       while (this.cache.size > this.cacheMax) {
         const [k, v] = this.cache.entries().next().value;
@@ -139,9 +148,15 @@ export class Mosaic {
 
   // 位置合わせ用のフル解像度グレースケールを用意する（メモリ節約のため少数だけ保持）
   async ensureFullGray(tile) {
-    if (!tile.feat.full) {
+    if (!tile.feat.full && !tile.grayBad) {
       const bmp = this.cache.get(tile.id) || await this.loadFull(tile);
-      tile.feat.full = { data: grayOf(bmp), w: tile.w, h: tile.h, scale: 1 };
+      if (isBlank(bmp)) {
+        // 読み込み失敗（真っ黒）の画像で位置合わせしても合わないので、粗い解像度だけで合わせる
+        tile.grayBad = true; tile.fullBad = true;
+        this.warn?.('一部の画像を高解像度で読み込めませんでした');
+      } else {
+        tile.feat.full = { data: grayOf(bmp), w: tile.w, h: tile.h, scale: 1 };
+      }
       if (!this.cache.has(tile.id)) bmp.close?.();
     }
     this.touchFullGray(tile);

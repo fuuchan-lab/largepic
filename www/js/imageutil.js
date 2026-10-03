@@ -78,19 +78,32 @@ export async function decodeBitmap(blob) {
   }
 }
 
+// ImageBitmap / Canvas がほぼ真っ黒・透明（読み込みに失敗した状態）かどうか
+// 縮小して数点を調べるだけなので軽い。地図は真っ黒にならない前提。
+export function isBlank(source) {
+  const c = newCanvas(16, 16);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, 16, 16);
+  const d = ctx.getImageData(0, 0, 16, 16).data;
+  c.width = c.height = 0;
+  let lit = 0;
+  for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 8 && d[i] + d[i + 1] + d[i + 2] > 24) lit++;
+  return lit < 3;
+}
+
 // blob の (sx,sy,w,h) 部分を ImageBitmap として取り出す
+// createImageBitmap の切り出し引数は iOS Safari で空白になることがあるため使わず、
+// 全体を読み込んでから（必要なら）キャンバスで切り出す。
 export async function decodeCrop(blob, sx, sy, w, h) {
-  try {
-    return await createImageBitmap(blob, sx, sy, w, h);
-  } catch {
-    const full = await decodeBitmap(blob);
-    const c = newCanvas(w, h);
-    c.getContext('2d').drawImage(full, sx, sy, w, h, 0, 0, w, h);
-    if (full.close) full.close();
-    const bmp = await createImageBitmap(c);
-    c.width = c.height = 0;
-    return bmp;
-  }
+  const full = await decodeBitmap(blob);
+  const fw = full.naturalWidth || full.width, fh = full.naturalHeight || full.height;
+  if (sx === 0 && sy === 0 && fw === w && fh === h && full.close) return full;
+  const c = newCanvas(w, h);
+  c.getContext('2d').drawImage(full, sx, sy, w, h, 0, 0, w, h);
+  if (full.close) full.close();
+  const bmp = await createImageBitmap(c);
+  c.width = c.height = 0;
+  return bmp;
 }
 
 export const nextFrame = () => new Promise((r) => setTimeout(r, 0));

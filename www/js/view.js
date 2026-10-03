@@ -137,7 +137,13 @@ export class View {
       let img = t.thumb;
       if (s * dpr > t.thumbScale * 1.15) img = mosaic.getFullCached(t) || t.thumb;
       ctx.globalAlpha = t.placed ? 1 : 0.85;
-      ctx.drawImage(img, sx(t.x), sy(t.y), t.w * s, t.h * s);
+      try {
+        ctx.drawImage(img, sx(t.x), sy(t.y), t.w * s, t.h * s);
+      } catch (e) {
+        // 閉じられた画像など。サムネイルで描き直し、それもだめならこのタイルだけ飛ばす
+        mosaic.cache.delete(t.id);
+        try { ctx.drawImage(t.thumb, sx(t.x), sy(t.y), t.w * s, t.h * s); } catch { /* skip */ }
+      }
       ctx.globalAlpha = 1;
       if (!t.placed) {
         ctx.setLineDash([8, 6]);
