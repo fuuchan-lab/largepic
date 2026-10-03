@@ -102,13 +102,27 @@ await page.evaluate(() => { window.largepic.mosaic.clear(); });
 const R = [];
 for (let k = 0; k < 24; k++) R.push([500 + k * 25, 600, 0, 1]);
 for (let k = 0; k < 30; k++) R.push([1100, 600 + k * 12, Math.min(40, k * 2.5), 1]);
-await importVideo(await makeVideo('vidRot', R));
-check(await warnOpen(), '回転した地図で撮影を停止し、警告ダイアログが出る');
-const t1 = await warnText(); console.log(t1.replace(/\n/g, ' / '));
-check(/回転/.test(t1) , '警告に「回転」と書かれている');
+await page.setInputFiles('#fileVideo', await makeVideo('vidRot', R));
+await page.waitForSelector('#dlgCrop[open]', { timeout: 20000 });
+await page.click('#dlgCrop [data-ok]');
+// 回転を見つけたら「回転」の警告。見つけきれなくても、つながらなくなった時点で止まり、回転の可能性を知らせる
+await page.waitForFunction(() => document.querySelector('#dlgWarn').open || document.querySelector('#dlgLost').open, null, { timeout: 120000, polling: 200 });
+const viaLost = await page.evaluate(() => document.querySelector('#dlgLost').open);
+if (viaLost) {
+  const lt = await page.evaluate(() => document.querySelector('#lsBody').textContent);
+  console.log(lt);
+  check(/回転/.test(lt), '回転を確定できなくても、止まって「回転した可能性」を知らせる');
+  await page.click('#lsSave');                       // ここまでを残して保存へ
+  await page.waitForSelector('#dlgExport[open]', { timeout: 30000 });
+  await page.click('#dlgExport [data-close]');
+} else {
+  check(await warnOpen(), '回転した地図で取り込みを停止し、警告ダイアログが出る');
+  const t1 = await warnText(); console.log(t1.replace(/\n/g, ' / '));
+  check(/回転/.test(t1), '警告に「回転」と書かれている');
+  await page.click('#warnOk');
+}
 const nRot = await tiles();
 check(nRot >= 3, `回転前までの分は取り込み済み (${nRot}枚)`);
-await page.click('#warnOk');
 const bbRot = await page.evaluate(() => window.largepic.mosaic.bbox());
 check(bbRot.h < 800, `回転後の画像は取り込まれていない (高さ ${bbRot.h})`);
 

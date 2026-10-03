@@ -25,7 +25,11 @@ function toGray(d, n) {
 let work = null;
 // source を切り抜いて作業用キャンバスに描き、グレースケールも返す
 // （キャンバスは使い回すので、必要なら呼び出し側ですぐ使うこと）
+import { perf } from './perf.js';
 export function grabFrame(source, sw, sh, crop) {
+  return perf.timeSync('grab', () => grabFrameImpl(source, sw, sh, crop));
+}
+function grabFrameImpl(source, sw, sh, crop) {
   const r = cropRect(sw, sh, crop);
   if (!work) work = newCanvas(1, 1);
   if (work.width !== r.w || work.height !== r.h) { work.width = r.w; work.height = r.h; }

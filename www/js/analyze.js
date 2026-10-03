@@ -6,6 +6,9 @@
 import { cropRect, newCanvas } from './imageutil.js';
 import { coarseMatch, scalesFor } from './register.js';
 import { yieldNow } from './awake.js';
+import { perf } from './perf.js';
+
+const ANALYSIS_SIDE = 112;   // 解析用に縮小した画像の長辺（px）
 
 function waitSeeked(video, t, ms = 4000) {
   return new Promise((res) => {
@@ -19,7 +22,7 @@ function waitSeeked(video, t, ms = 4000) {
 // 縮小して粗い特徴（register.js の coarse と同じ形）を作る
 function makeGrabber(video, crop) {
   const r = cropRect(video.videoWidth, video.videoHeight, crop);
-  const sc = scalesFor(r.w, r.h).coarse;
+  const sc = Math.min(1, ANALYSIS_SIDE / Math.max(r.w, r.h));   // 解析用の画像は小さくてよい（位置の細かい合わせは本番の取り込みでやる）
   const cw = Math.max(8, Math.round(r.w * sc)), ch = Math.max(8, Math.round(r.h * sc));
   const cv = newCanvas(cw, ch);
   const ctx = cv.getContext('2d', { willReadFrequently: true });
@@ -36,14 +39,16 @@ function makeGrabber(video, crop) {
   };
 }
 
-// 再生しながらコマを集める。コールバックが来ない環境では null を返す（呼び出し側でシークに切り替える）
-async function collectByPlayback(video, grabber, { start, end, step, onProgress, isCancelled }) {
-  if (!('requestVideoFrameCallback' in video)) return null;
-  const samples = [];
+// 再生しながらコマを集める。コマが届くたびに onSample() で処理する（集めながら位置も追うので、待ち時間が重ならない）。
+// 処理が追いつくよう、1コマの処理時間に合わせて再生速度を調整する（処理が軽いほど速く再生できる）。
+// コールバックが来ない環境では false を返す（呼び出し側でシークに切り替える）
+async function collectByPlayback(video, grabber, { start, end, step, onProgress, isCancelled, onSample }) {
+  if (!('requestVideoFrameCallback' in video)) return false;
+  let count = 0;
   await waitSeeked(video, start);
   const prevRate = video.playbackRate;
   video.playbackRate = 2;
-  try { await video.play(); } catch { video.playbackRate = prevRate; return null; }
+  try { await video.play(); } catch { video.playbackRate = prevRate; return false; }
   return new Promise((resolve) => {
     let last = -Infinity, lastCb = performance.now(), finished = false;
     const finish = (val) => {
@@ -56,35 +61,42 @@ async function collectByPlayback(video, grabber, { start, end, step, onProgress,
     };
     const watch = setInterval(() => {
       // 3 秒コールバックが来なければ諦める
-      if (performance.now() - lastCb > 3000) finish(samples.length >= 3 ? samples : null);
+      if (performance.now() - lastCb > 3000) finish(count >= 3);
     }, 500);
     const cb = (now, meta) => {
       if (finished) return;
       lastCb = performance.now();
       const t = meta.mediaTime;
       if (t - last >= step * 0.9 && t >= start - 1e-3 && t <= end + 1e-3) {
-        samples.push({ t, feat: grabber.grab() });
+        const t0 = performance.now();
+        onSample({ t, feat: grabber.grab() });
+        count++;
         last = t;
         onProgress?.((t - start) / Math.max(0.01, end - start));
+        // 1コマの処理時間に合わせた再生速度：コマの間隔（メディア時間 step）の間に処理が終わるように
+        const work = performance.now() - t0;
+        video.playbackRate = Math.max(1, Math.min(4, (step * 1000 * 0.85) / (work + 4)));
       }
-      if (t >= end - 0.02 || video.ended || isCancelled?.()) return finish(samples);
+      if (t >= end - 0.02 || video.ended || isCancelled?.()) {
+        // 最後のコマは、間隔が近くても必ず取る（端まで取り込むため）
+        if (t - last > 0.02 && t <= end + 1e-3 && !isCancelled?.()) { onSample({ t, feat: grabber.grab() }); count++; }
+        return finish(true);
+      }
       video.requestVideoFrameCallback(cb);
     };
-    video.addEventListener('ended', () => finish(samples), { once: true });
+    video.addEventListener('ended', () => finish(true), { once: true });
     video.requestVideoFrameCallback(cb);
   });
 }
 
-async function collectBySeek(video, grabber, { start, end, step, onProgress, isCancelled }) {
-  const samples = [];
+async function collectBySeek(video, grabber, { start, end, step, onProgress, isCancelled, onSample }) {
   for (let t = start; t < end - 1e-3; t += step) {
     if (isCancelled?.()) break;
     await waitSeeked(video, t);
-    samples.push({ t, feat: grabber.grab() });
+    onSample({ t, feat: grabber.grab() });
     onProgress?.((t - start) / Math.max(0.01, end - start));
     await yieldNow();
   }
-  return samples;
 }
 
 // 解析：サンプルごとの位置（区間ごとの相対座標）を求める
@@ -92,37 +104,49 @@ async function collectBySeek(video, grabber, { start, end, step, onProgress, isC
 export async function analyzeVideo(video, crop, opts) {
   const grabber = makeGrabber(video, crop);
   const step = opts.step ?? 0.1;
-  const o = { ...opts, step };
-  let raw = await collectByPlayback(video, grabber, o);
-  let mode = 'playback';
-  if (!raw || raw.length < 3) { raw = await collectBySeek(video, grabber, o); mode = 'seek'; }
   const sc = grabber.scale;
   const threshold = (opts.threshold ?? 0.55) * 0.85;
-  const out = [];
-  let seg = 0, x = 0, y = 0, prev = null, vel = null, broken = 0;
-  for (let i = 0; i < raw.length; i++) {
-    const { t, feat } = raw[i];
-    if (opts.isCancelled?.()) break;
-    if (!prev) {
-      out.push({ t, x, y, seg, speed: Infinity });
+
+  // コマが届くたびに、直前のコマとの移動量を求めて経路（軌跡）を延ばす
+  const newState = () => ({ out: [], seg: 0, x: 0, y: 0, prev: null, vel: null, broken: 0, n: 0 });
+  let st = newState();
+  const feed = (sample) => {
+    const { t, feat } = sample;
+    st.n++;
+    if (!st.prev) {
+      st.out.push({ t, x: st.x, y: st.y, seg: st.seg, speed: Infinity });
     } else {
-      const r = coarseMatch(prev.feat, feat, { hint: vel || undefined, prior: vel || undefined });
+      // まず小さな FFT（ずれが画面の 7 割以内）で試し、合わなければ全範囲で探し直す
+      const r = perf.timeSync('analysis.match', () => {
+        const o = { hint: st.vel || undefined, prior: st.vel || undefined };
+        const q = coarseMatch(st.prev.feat, feat, { ...o, maxShift: 0.7 });
+        return q && q.score >= threshold ? q : (coarseMatch(st.prev.feat, feat, o) || q);
+      });
       if (r && r.score >= threshold) {
         const dx = r.dx / sc, dy = r.dy / sc;
-        x += dx; y += dy; vel = { dx, dy };
-        out.push({ t, x, y, seg, speed: Math.hypot(dx, dy) / Math.max(0.01, t - prev.t) });
+        st.x += dx; st.y += dy; st.vel = { dx, dy };
+        st.out.push({ t, x: st.x, y: st.y, seg: st.seg, speed: Math.hypot(dx, dy) / Math.max(0.01, t - st.prev.t) });
       } else {
         // 追えなかった：ここから新しい区間（座標は区間ごとの相対）
-        seg++; x = 0; y = 0; vel = null; broken++;
-        out.push({ t, x, y, seg, speed: Infinity, newSeg: true });
+        st.seg++; st.x = 0; st.y = 0; st.vel = null; st.broken++;
+        st.out.push({ t, x: 0, y: 0, seg: st.seg, speed: Infinity, newSeg: true });
       }
-      prev.feat = null; // 使い終わったコマはメモリから外す
+      st.prev.feat = null; // 使い終わったコマはメモリから外す
     }
-    prev = raw[i];
-    if (i % 6 === 5) await yieldNow();
-    opts.onAnalyze?.(i / raw.length);
+    st.prev = sample;
+  };
+
+  const tc = performance.now();
+  const o = { ...opts, step, onSample: feed };
+  let mode = 'playback';
+  const ok = await collectByPlayback(video, grabber, o);
+  if (!ok || st.n < 3) {
+    st = newState();      // 再生で集められなかったので、最初から一定間隔のシークでやり直す
+    mode = 'seek';
+    await collectBySeek(video, grabber, o);
   }
-  return { samples: out, w: grabber.w, h: grabber.h, mode, brokenFraction: raw.length ? broken / raw.length : 1 };
+  perf.add('analysis.collect', performance.now() - tc);
+  return { samples: st.out, w: grabber.w, h: grabber.h, mode, brokenFraction: st.n ? st.broken / st.n : 1 };
 }
 
 const overlapFrac = (a, b, w, h) => {
@@ -192,4 +216,42 @@ export function selectKeyframes(plan, { minOverlap = 0.4 } = {}) {
     keys.push(...mine);
   }
   return keys;
+}
+
+// 選んだコマ（キーフレーム）を、動画を再生しながら取り出す読み取り係。
+// コマごとにシークするより速い（シークはコマごとに近くのキーフレームまで戻って読み直すので遅い）。
+// 目的のコマが出た瞬間に再生を止めて取り込み、処理が終わったら続きから再生する。
+// 再生で取り出せない環境（requestVideoFrameCallback がない等）では、従来どおりシークする。
+export function makeKeyReader(video, grabFull, seek) {
+  let broken = !('requestVideoFrameCallback' in video);
+  const bySeek = async (t, why = '') => { perf.add('key.bySeek' + why, 0); video.pause(); await seek(video, t); return grabFull(); };
+  return {
+    async get(t) {
+      if (broken || video.currentTime > t + 0.02) return bySeek(t, broken ? '(broken)' : '(back)');   // すでに過ぎた時刻（逆戻り）はシーク
+      return new Promise((resolve) => {
+        let done = false, lastCb = performance.now();
+        const finish = (v) => { if (done) return; done = true; clearInterval(watch); resolve(v); };
+        const fallback = async () => { broken = true; finish(await bySeek(t, '(fallback)')); };
+        // 3 秒コールバックが来なければ、シークに切り替える
+        const watch = setInterval(() => { if (performance.now() - lastCb > 3000) fallback(); }, 500);
+        const cb = async (now, meta) => {
+          if (done) return;
+          lastCb = performance.now();
+          if (meta.mediaTime >= t - 1e-3) {
+            video.pause();
+            // 目的のコマから大きくずれた（コマが飛んだ）ときは、正確にシークし直す
+            if (meta.mediaTime - t > 0.04) return finish(await bySeek(t, '(skip)'));
+            perf.add('key.byPlay', 0);
+            return finish(grabFull());
+          }
+          // 目的のコマが遠いうちは速く、近づいたらゆっくり（コマを飛ばさないため）
+          const remain = t - meta.mediaTime;
+          video.playbackRate = remain > 0.8 ? 6 : remain > 0.3 ? 3 : 1.5;
+          video.requestVideoFrameCallback(cb);
+        };
+        video.playbackRate = Math.abs(t - video.currentTime) > 0.8 ? 6 : 2;
+        video.play().then(() => video.requestVideoFrameCallback(cb)).catch(fallback);
+      });
+    },
+  };
 }

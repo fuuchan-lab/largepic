@@ -1,6 +1,7 @@
 // 新しい画像（フレーム）をモザイクのどこに置くかを決める
 import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, ncc, scalesFor } from './register.js';
 import { makeThumb, canvasToBlob, nextFrame } from './imageutil.js';
+import { perf } from './perf.js';
 
 const overlapArea = (a, b) =>
   Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
@@ -17,17 +18,17 @@ export class Stitcher {
 
   features(frame) {
     if (!this.scales || !this.mosaic.tiles.length) this.scales = scalesFor(frame.w, frame.h);
-    return makeFeatures(frame.gray, frame.w, frame.h, this.scales);
+    return perf.timeSync('features', () => makeFeatures(frame.gray, frame.w, frame.h, this.scales));
   }
 
   // frame.canvas の内容からタイルを作る。srcBlob があればそれを元画像として使う
   async makeTile(frame, feat, srcBlob, x, y, placed) {
     let src = srcBlob, sx = frame.rect.sx, sy = frame.rect.sy;
     if (!src) {
-      src = await canvasToBlob(frame.canvas, 'image/png', 1);
+      src = await perf.time('tile.png', () => canvasToBlob(frame.canvas, 'image/png', 1));
       sx = 0; sy = 0;
     }
-    const { bmp, scale } = await makeThumb(frame.canvas, frame.w, frame.h, this.settings.thumbSize);
+    const { bmp, scale } = await perf.time('tile.thumb', () => makeThumb(frame.canvas, frame.w, frame.h, this.settings.thumbSize));
     const tile = { x, y, w: frame.w, h: frame.h, placed, thumb: bmp, thumbScale: scale, src, sx, sy, feat };
     this.mosaic.add(tile);
     this.mosaic.touchFullGray(tile);
@@ -37,6 +38,10 @@ export class Stitcher {
   // 既存タイル（order の順）に対して feat の位置を探す
   // タイルが多いときは、粗い解像度で全部を素早く採点してから有望なものだけ詰める
   async locate(feat, order) {
+    return perf.time('locate', () => this._locate(feat, order));
+  }
+
+  async _locate(feat, order) {
     order = order.filter((t) => t.placed);
     if (order.length > 3) {
       const scored = [];
@@ -93,6 +98,10 @@ export class Stitcher {
 
   // 位置 (x,y) 付近で、重なっている既存タイルとの位置合わせを詰める
   async refineAt(feat, x, y, radius, exclude = null) {
+    return perf.time('refineAt', () => this._refineAt(feat, x, y, radius, exclude));
+  }
+
+  async _refineAt(feat, x, y, radius, exclude = null) {
     const rect = { x, y, w: feat.w, h: feat.h };
     const others = this.mosaic.placed()
       .filter((t) => t !== exclude)
@@ -199,6 +208,31 @@ export class Tracker {
   // 位置合わせに成功した（＝回転や拡大率の変化ではなかった）ので、疑いをリセット
   clearTransform() { this.tf.hits = 0; this.tf.lostFrames = 0; }
 
+  // 「つながらなくなった」と止める前に、直近のコマが取り込み済みの複数のタイルに対して
+  // 同じ回転・拡大率になっていないかをまとめて調べる（回転・拡大率の変化なら、その警告を優先する）
+  quickTransformCheck() {
+    if (!this.lastFeat) return null;
+    // 直近のコマに近いタイルから順に（重なりのあるタイルでないと判定できない）
+    let tiles = [...this.mosaic.placed()];
+    const p = this.pos;
+    tiles.sort(p ? (a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y) : (a, b) => b.id - a.id);
+    tiles = tiles.slice(0, 6);
+    const same = (d, e) => Math.abs(Math.abs(d.angle) - Math.abs(e.angle)) < 6 && Math.abs(Math.log(d.scale) - Math.log(e.scale)) < 0.08;
+    const found = [];
+    // これまでの判定（別のコマで見つかった回転・拡大）も、同じ内容なら1回分の根拠になる
+    if (this.tf.hits > 0 && this.tf.last) found.push(this.tf.last);
+    for (const t of tiles) {
+      let d = null;
+      try { d = diagnoseTransform(t.feat, this.lastFeat); } catch (e) { console.warn(e); }
+      if (d && (!found.length || found.some((f) => same(d, f)))) found.push(d);
+      if (found.length >= 2) break;
+    }
+    if (found.length < 2) return null;
+    const base = found[found.length - 1];
+    this.tf.last = base;
+    return { state: 'transform', rect: this.lastRect || null, angle: base.angle, scale: base.scale };
+  }
+
   transformResult(rect) {
     const d = this.tf.last;
     return { state: 'transform', rect, angle: d.angle, scale: d.scale };
@@ -218,6 +252,7 @@ export class Tracker {
   async _process(frame, opts = {}) {
     const st = this.st;
     const feat = st.features(frame);
+    this.lastFeat = feat;
     const rectAt = (p) => (p ? { x: p.x, y: p.y, w: frame.w, h: frame.h } : null);
     this.stats.frames++;
 
@@ -248,7 +283,14 @@ export class Tracker {
       const small = Math.min(frame.w, frame.h);
       const hint = opts.hint || this.vel || undefined;
       const fastScroll = hint && Math.hypot(hint.dx, hint.dy) > small * 0.1;
-      let r = register(this.ref, feat, { hint, prior: hint, fastScroll });
+      let r = perf.timeSync('track.register', () => {
+        // 事前解析の移動量が分かっているときは、小さな FFT で足りる。合わなければ全範囲で探し直す
+        if (opts.hint) {
+          const q = register(this.ref, feat, { hint, prior: hint, fastScroll, maxShift: 0.7 });
+          if (q && q.score >= st.threshold) return q;
+        }
+        return register(this.ref, feat, { hint, prior: hint, fastScroll });
+      });
       // 事前解析の移動量と大きく食い違い、しかも確信が弱い結果は信用しない
       // （海のように模様が少ない所で、別の場所に吸着してしまうのを防ぐ）
       // 重なりが小さい結果は、偶然の一致でも高い値が出るので採用しない

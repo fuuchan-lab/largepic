@@ -3,50 +3,59 @@
 // DOM に依存しないので Node でもテストできる。
 
 // ---------- FFT ----------
-function fft1d(re, im, n, inverse) {
+// 基数2の反復FFT。回転係数とビット反転の表を大きさごとに1回だけ作って使い回す。
+const fftPlans = new Map();
+function fftPlan(n) {
+  let p = fftPlans.get(n);
+  if (p) return p;
+  const rev = new Uint32Array(n);
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;
     for (; j & bit; bit >>= 1) j ^= bit;
     j ^= bit;
+    rev[i] = j;
+  }
+  const cos = new Float64Array(n >> 1), sin = new Float64Array(n >> 1);
+  for (let k = 0; k < n >> 1; k++) { cos[k] = Math.cos((2 * Math.PI * k) / n); sin[k] = Math.sin((2 * Math.PI * k) / n); }
+  p = { rev, cos, sin };
+  fftPlans.set(n, p);
+  return p;
+}
+
+// re/im の off から n 個を、その場で変換（inverse は逆変換。1/n の正規化はしない）
+function fft1d(re, im, n, inverse, off = 0) {
+  const { rev, cos, sin } = fftPlan(n);
+  for (let i = 1; i < n; i++) {
+    const j = rev[i];
     if (i < j) {
-      let t = re[i]; re[i] = re[j]; re[j] = t;
-      t = im[i]; im[i] = im[j]; im[j] = t;
+      const a = off + i, b = off + j;
+      let t = re[a]; re[a] = re[b]; re[b] = t;
+      t = im[a]; im[a] = im[b]; im[b] = t;
     }
   }
+  const sg = inverse ? 1 : -1;
   for (let len = 2; len <= n; len <<= 1) {
-    const ang = (2 * Math.PI / len) * (inverse ? 1 : -1);
-    const wr = Math.cos(ang), wi = Math.sin(ang);
-    const half = len >> 1;
+    const half = len >> 1, step = n / len;
     for (let i = 0; i < n; i += len) {
-      let cr = 1, ci = 0;
-      for (let k = 0; k < half; k++) {
-        const a = i + k, b = a + half;
-        const tr = re[b] * cr - im[b] * ci;
-        const ti = re[b] * ci + im[b] * cr;
-        re[b] = re[a] - tr; im[b] = im[a] - ti;
-        re[a] += tr; im[a] += ti;
-        const ncr = cr * wr - ci * wi;
-        ci = cr * wi + ci * wr;
-        cr = ncr;
+      for (let k = 0, t = 0; k < half; k++, t += step) {
+        const wr = cos[t], wi = sg * sin[t];
+        const a = off + i + k, b = a + half;
+        const xr = re[b] * wr - im[b] * wi;
+        const xi = re[b] * wi + im[b] * wr;
+        re[b] = re[a] - xr; im[b] = im[a] - xi;
+        re[a] += xr; im[a] += xi;
       }
     }
   }
 }
 
+// nx×ny の2次元FFT。行は連続したメモリなのでそのまま変換し、列は転置して同じ処理にする（コピーが少なく速い）
 function fft2d(re, im, nx, ny, inverse) {
-  const rr = new Float64Array(Math.max(nx, ny));
-  const ii = new Float64Array(Math.max(nx, ny));
-  for (let y = 0; y < ny; y++) {
-    const o = y * nx;
-    for (let x = 0; x < nx; x++) { rr[x] = re[o + x]; ii[x] = im[o + x]; }
-    fft1d(rr, ii, nx, inverse);
-    for (let x = 0; x < nx; x++) { re[o + x] = rr[x]; im[o + x] = ii[x]; }
-  }
-  for (let x = 0; x < nx; x++) {
-    for (let y = 0; y < ny; y++) { rr[y] = re[y * nx + x]; ii[y] = im[y * nx + x]; }
-    fft1d(rr, ii, ny, inverse);
-    for (let y = 0; y < ny; y++) { re[y * nx + x] = rr[y]; im[y * nx + x] = ii[y]; }
-  }
+  for (let y = 0; y < ny; y++) fft1d(re, im, nx, inverse, y * nx);
+  const tr = new Float64Array(nx * ny), ti = new Float64Array(nx * ny);
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) { tr[x * ny + y] = re[y * nx + x]; ti[x * ny + y] = im[y * nx + x]; }
+  for (let x = 0; x < nx; x++) fft1d(tr, ti, ny, inverse, x * ny);
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) { re[y * nx + x] = tr[x * ny + y]; im[y * nx + x] = ti[x * ny + y]; }
 }
 
 const nextPow2 = (v) => { let n = 1; while (n < v) n <<= 1; return n; };
@@ -122,21 +131,35 @@ function coarseSpectrum(f, nx, ny) {
   return f._fft;
 }
 
-// エッジ検出（Sobel）で平坦度を計算
-function computeEdgeDensity(data, w, h, x0, y0, x1, y1, stride) {
-  let edges = 0, count = 0;
-  for (let y = Math.max(1, y0); y < Math.min(h - 1, y1); y += stride) {
-    for (let x = Math.max(1, x0); x < Math.min(w - 1, x1); x += stride) {
-      const o = y * w + x;
-      const gx = Math.abs(data[o - w - 1] + 2 * data[o - 1] + data[o + w - 1]
-                        - data[o - w + 1] - 2 * data[o + 1] - data[o + w + 1]);
-      const gy = Math.abs(data[o - w - 1] + 2 * data[o - w] + data[o - w + 1]
-                        - data[o + w - 1] - 2 * data[o + w] - data[o + w + 1]);
-      if (gx + gy > 50) edges++;
-      count++;
+// エッジ（Sobel）の多い画素の累積和（積分画像）。長方形の中のエッジ密度を、位置によらず O(1) で求められる。
+// ncc() は探索のたびに呼ばれるので、毎回その場で数えると重い。画像ごとに1回だけ作って使い回す。
+function edgeIntegral(L) {
+  if (L._edgeII) return L._edgeII;
+  const { data, w, h } = L;
+  const W = w + 1;
+  const ii = new Uint32Array(W * (h + 1));
+  for (let y = 1; y <= h; y++) {
+    let row = 0;
+    for (let x = 1; x <= w; x++) {
+      let e = 0;
+      if (y > 1 && y < h && x > 1 && x < w) {
+        const o = (y - 1) * w + (x - 1);
+        const gx = Math.abs(data[o - w - 1] + 2 * data[o - 1] + data[o + w - 1] - data[o - w + 1] - 2 * data[o + 1] - data[o + w + 1]);
+        const gy = Math.abs(data[o - w - 1] + 2 * data[o - w] + data[o - w + 1] - data[o + w - 1] - 2 * data[o + w] - data[o + w + 1]);
+        e = gx + gy > 50 ? 1 : 0;
+      }
+      row += e;
+      ii[y * W + x] = ii[(y - 1) * W + x] + row;
     }
   }
-  return count > 0 ? edges / count : 0;
+  return (L._edgeII = ii);
+}
+function computeEdgeDensity(L, x0, y0, x1, y1) {
+  const ii = edgeIntegral(L), W = L.w + 1;
+  x0 = Math.max(1, x0); y0 = Math.max(1, y0); x1 = Math.min(L.w - 1, x1); y1 = Math.min(L.h - 1, y1);
+  if (x1 <= x0 || y1 <= y0) return 0;
+  const n = ii[y1 * W + x1] - ii[y0 * W + x1] - ii[y1 * W + x0] + ii[y0 * W + x0];
+  return n / ((x1 - x0) * (y1 - y0));
 }
 
 // ---------- NCC ----------
@@ -161,8 +184,8 @@ export function ncc(A, B, dx, dy, stride = 1) {
 
   // 平坦性チェック改善：エッジ密度を考慮
   let flatScore = Math.min(1, Math.sqrt(Math.min(va, vb) / n) / 2.5);
-  const edgeA = computeEdgeDensity(a, A.w, A.h, x0, y0, x1, y1, stride);
-  const edgeB = computeEdgeDensity(b, B.w, B.h, x0 - dx, y0 - dy, x1 - dx, y1 - dy, stride);
+  const edgeA = computeEdgeDensity(A, x0, y0, x1, y1);
+  const edgeB = computeEdgeDensity(B, x0 - dx, y0 - dy, x1 - dx, y1 - dy);
   if (edgeA > 0.05 || edgeB > 0.05) flatScore = Math.min(1, flatScore + 0.3);
 
   const raw = (sab - sa * sb / n) / Math.sqrt(va * vb);
@@ -215,7 +238,10 @@ function refine(a, b, cdx, cdy, minOverlap, fastScroll = false) {
 function coarseCandidates(a, b, opts) {
   const minOverlap = opts.minOverlap ?? 0.08;
   const A = a.coarse, B = b.coarse;
-  const nx = nextPow2(A.w + B.w), ny = nextPow2(A.h + B.h);
+  // FFT の大きさ：重なりが十分ある（ずれが maxShift 以内）と分かっているときは、小さくできる（既定は全範囲）。
+  // 位相相関は周期的なので、大きさは 2 のべき乗で、ずれの範囲の 2 倍以上あればよい。
+  const f = 1 + (opts.maxShift ?? 1);
+  const nx = nextPow2(Math.ceil(Math.max(A.w, B.w) * f)), ny = nextPow2(Math.ceil(Math.max(A.h, B.h) * f));
   const fa = coarseSpectrum(a, nx, ny), fb = coarseSpectrum(b, nx, ny);
   const n = nx * ny;
   const re = new Float64Array(n), im = new Float64Array(n);
@@ -231,16 +257,19 @@ function coarseCandidates(a, b, opts) {
   // 上位ピーク
   const K = opts.candidates ?? 10;
   const peaks = [];
-  for (let y = 0; y < ny; y++) {
-    for (let x = 0; x < nx; x++) {
-      const v = re[y * nx + x];
-      if (peaks.length < K * 4 || v > peaks[peaks.length - 1].v) {
-        peaks.push({ x, y, v });
-        peaks.sort((p, q) => q.v - p.v);
-        if (peaks.length > K * 4) peaks.pop();
-      }
+  const cap = K * 4;
+  let minV = -Infinity;   // 上位 cap 個のうち最小の値（これ以下は調べない）
+  for (let i = 0, n = nx * ny; i < n; i++) {
+    const v = re[i];
+    if (v <= minV) continue;
+    peaks.push({ x: i % nx, y: (i / nx) | 0, v });
+    if (peaks.length >= cap) {
+      peaks.sort((p, q) => q.v - p.v);
+      if (peaks.length > cap) peaks.length = cap;
+      minV = peaks[peaks.length - 1].v;
     }
   }
+  peaks.sort((p, q) => q.v - p.v);
   const cands = [];
   for (const p of peaks) {
     const dx = p.x >= nx / 2 ? p.x - nx : p.x;

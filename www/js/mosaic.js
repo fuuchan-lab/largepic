@@ -1,4 +1,5 @@
 // 貼り合わせ中の画像（タイル）の集合
+import { perf } from './perf.js';
 import { decodeCrop, grayOf, newCanvas, canvasToBlob, isBlank } from './imageutil.js';
 
 // tile: {
@@ -180,7 +181,7 @@ export class Mosaic {
   // 位置合わせ用のフル解像度グレースケールを用意する（メモリ節約のため少数だけ保持）
   async ensureFullGray(tile) {
     if (!tile.feat.full && !tile.grayBad) {
-      const bmp = this.cache.get(tile.id) || await this.loadFull(tile);
+      const bmp = this.cache.get(tile.id) || await perf.time('fullGray.decode', () => this.loadFull(tile));
       if (isBlank(bmp)) {
         // 読み込み失敗（真っ黒）の画像で位置合わせしても合わないので、粗い解像度だけで合わせる
         tile.grayBad = true; tile.fullBad = true;

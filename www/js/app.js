@@ -1,12 +1,13 @@
 import { Mosaic } from './mosaic.js';
 import { View, drawOverview } from './view.js';
 import { Stitcher, Tracker } from './stitcher.js';
-import { analyzeVideo, selectKeyframes } from './analyze.js';
+import { analyzeVideo, selectKeyframes, makeKeyReader } from './analyze.js';
 import { ImageViewer } from './viewer.js';
 import { exportTiles } from './tiles.js';
 import { library } from './library.js';
 import { keepAwake, sleep } from './awake.js';
 import { jobs } from './jobs.js';
+import { perf } from './perf.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -15,7 +16,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.8';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.9';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -171,12 +172,14 @@ function resolveConflict(r, where, batch) {
 }
 
 // つながらなくなった（位置を見失い続けた）とき。選んだ操作をして 'stop' か 'continue' を返す
-function resolveLost(where, batch) {
+function resolveLost(where, batch, tracker = null) {
   importLog.events.push({ type: 'lost', where });
   return new Promise((resolve) => {
     const dlg = $('#dlgLost');
     const mine = mosaic.batchTiles(batch).length;
+    const rot = tracker && tracker.tf && tracker.tf.last;   // 回転・拡大率の変化を疑う根拠が一度でも見つかっていた
     $('#lsBody').textContent = `${where}で、すでに取り込んだ部分と画像がつながらなくなったので止めました。`
+      + (rot ? '地図が回転した、または拡大率が変わった可能性があります（撮影中は北上固定・拡大縮小なしにしてください）。' : '')
       + '無理に続けると、ずれた画像が増えるおそれがあります。';
     $('#lsBack').disabled = mine < 1;
     $('#lsUndo').disabled = mine < 1;
@@ -275,6 +278,9 @@ function waitEvent(el, ev, ms = 8000) {
 }
 
 async function seek(video, t) {
+  return perf.time('seek', () => seek0(video, t));
+}
+async function seek0(video, t) {
   if (Math.abs(video.currentTime - t) < 1e-3) return;
   const p = waitEvent(video, 'seeked');
   video.currentTime = t;
@@ -295,6 +301,7 @@ async function addVideo(file, resume = null) {
   let jobActive = false;
   const t0Import = Date.now();
   importLog.events = [];
+  perf.reset();
   Object.assign(importLog, { batch, file: file.name || '(blob)', size: file.size, startedAt: new Date().toISOString(), tilesBefore: mosaic.tiles.length });
   try {
     video.src = url;
@@ -321,11 +328,11 @@ async function addVideo(file, resume = null) {
       if (resume) throw new Error('RESUME');   // 続きの取り込み：解析はやり直さない
       if (settings.fullScan) throw new Error('全コマ方式（設定）');
       prog.set(0, '動画を解析しています…');
-      const plan = await analyzeVideo(video, crop, {
+      const plan = await perf.time('analysis', () => analyzeVideo(video, crop, {
         start, end, step: Math.min(0.12, step), threshold: settings.threshold,
         onProgress: (p) => prog.set(p * 0.4, `動画を解析しています… ${Math.round(p * 100)}%`),
         isCancelled: () => prog.cancelled,
-      });
+      }));
       Object.assign(importLog, { analysis: { mode: plan.mode, samples: plan.samples.length, brokenFraction: +plan.brokenFraction.toFixed(3), segments: new Set(plan.samples.map((q) => q.seg)).size } });
       if (!prog.cancelled && plan.samples.length >= 3 && plan.brokenFraction < 0.5) {
         keys = selectKeyframes(plan);
@@ -346,18 +353,20 @@ async function addVideo(file, resume = null) {
       if (resume) jobActive = true;
       else jobActive = await jobs.start({ keys, crop, start, end, batch, wasEmpty, name: file.name || '動画' }, file);
       // 2) 選んだコマだけを高解像度で取り込む（解析で分かった移動量を位置合わせのヒントに使う）
+      const reader = makeKeyReader(video, () => grabFrame(video, video.videoWidth, video.videoHeight, crop), seek0);
       const i0 = resume ? Math.min(resume.next, keys.length - 1) : 0;
       if (resume) keys[i0] = { ...keys[i0], newSeg: true };   // 続きの最初は、取り込み済みの場所から探し直す
       for (let i = i0; i < keys.length; i++) {
         if (prog.cancelled) break;
         const k = keys[i], pk = i > i0 ? keys[i - 1] : null;
-        await seek(video, k.t);
-        const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
+        const frame = await perf.time('seek', () => reader.get(k.t));   // 再生しながら、そのコマが出た瞬間に取り込む
         const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
         const r = await tracker.process(frame, { hint, kpos: { x: k.x, y: k.y }, vt: k.t, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
         if (r.state === 'transform') { stopped = { r, t: k.t }; break; }
         if (shouldStopLost(tracker, r, LOST_LIMIT.key)) {
-          const act = await resolveLost(`動画の ${(k.t - start).toFixed(1)} 秒付近`, batch);
+          const tr = tracker.quickTransformCheck();
+          if (tr) { stopped = { r: tr, t: k.t }; break; }
+          const act = await resolveLost(`動画の ${(k.t - start).toFixed(1)} 秒付近`, batch, tracker);
           if (act === 'continue') { tracker.lostRun = 0; tracker.lostIgnore = 6; } else { stopped = { conflict: true }; break; }
         }
         if (r.state === 'conflict') {
@@ -386,7 +395,9 @@ async function addVideo(file, resume = null) {
         const r = await tracker.process(frame, { final: i === times.length - 1 });
         if (r.state === 'transform') { stopped = { r, t }; break; }
         if (shouldStopLost(tracker, r, LOST_LIMIT.all)) {
-          const act = await resolveLost(`動画の ${(t - start).toFixed(1)} 秒付近`, batch);
+          const tr = tracker.quickTransformCheck();
+          if (tr) { stopped = { r: tr, t }; break; }
+          const act = await resolveLost(`動画の ${(t - start).toFixed(1)} 秒付近`, batch, tracker);
           if (act === 'continue') { tracker.lostRun = 0; tracker.lostIgnore = 12; } else { stopped = { conflict: true }; break; }
         }
         if (r.state === 'conflict') {
@@ -406,6 +417,7 @@ async function addVideo(file, resume = null) {
     view.fit();
     const { added, lost } = tracker.stats;
     console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
+    importLog.perf = perf.report();
     Object.assign(importLog, { method: keys ? 'keyframes' : 'allframes', stats: tracker.stats, ms: Date.now() - t0Import, stopped: stopped ? (stopped.conflict ? 'conflict' : 'transform') : null });
     if (stopped?.conflict) {
       if (!pendingExport) toast('取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
@@ -592,7 +604,7 @@ async function liveLoop() {
           live.paused = true;
           $('#btnLivePause').textContent = '再開';
           setLiveState('lost', '停止中：画像がつながらなくなりました');
-          const act = await resolveLost('ライブ取り込み中', live.batch);
+          const act = await resolveLost('ライブ取り込み中', live.batch, live.tracker);
           if (act === 'continue') { live.tracker.lostRun = 0; live.tracker.lostIgnore = 30; live.paused = false; $('#btnLivePause').textContent = '一時停止'; live.tracker.lost = true; }
           else { await stopLive(); openExportIfPending(); }
           continue;
