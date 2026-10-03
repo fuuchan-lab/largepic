@@ -289,3 +289,150 @@ export function registerNear(a, b, dx, dy, radiusFull, opts = {}) {
   if (!c) return null;
   return refine(a, b, c.dx, c.dy, minOverlap);
 }
+
+// ---------- 回転・拡大率の検出（Fourier–Mellin）----------
+// 平行移動だけでは合わないとき、2枚のあいだに回転や拡大率の違いがないかを調べる。
+// 振幅スペクトルを対数極座標にすると、回転と拡大が「平行移動」になるので位相相関で求められる。
+// 候補は、実際に画像を変形して位置合わせ（NCC）できるか確認してから採用する。
+const FM_N = 256, FM_A = 128, FM_R = 128;
+const FM_RMIN = 6, FM_RMAX = FM_N / 2 - 2;
+const FM_LOGK = Math.log(FM_RMAX / FM_RMIN) / (FM_R - 1);
+
+function logPolar(f) {
+  if (f._lp) return f._lp;
+  const { data, w, h } = f.coarse;
+  const N = FM_N;
+  const re = new Float64Array(N * N), im = new Float64Array(N * N);
+  let mean = 0;
+  for (let i = 0; i < w * h; i++) mean += data[i];
+  mean /= w * h;
+  const tx = Math.max(2, Math.round(w * 0.15)), ty = Math.max(2, Math.round(h * 0.15));
+  const tap = (i, n, t) => (i < t ? 0.5 - 0.5 * Math.cos(Math.PI * (i + 0.5) / t)
+    : i >= n - t ? 0.5 - 0.5 * Math.cos(Math.PI * (n - i - 0.5) / t) : 1);
+  const ox = (N - w) >> 1, oy = (N - h) >> 1;
+  for (let y = 0; y < h; y++) {
+    const wy = tap(y, h, ty);
+    for (let x = 0; x < w; x++) re[(y + oy) * N + x + ox] = (data[y * w + x] - mean) * wy * tap(x, w, tx);
+  }
+  fft2d(re, im, N, N, false);
+  const mag = new Float32Array(N * N);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const i = y * N + x;
+      mag[((y + N / 2) % N) * N + (x + N / 2) % N] = Math.log(1 + Math.hypot(re[i], im[i]));
+    }
+  }
+  const out = new Float64Array(FM_A * FM_R);
+  const cx = N / 2, cy = N / 2;
+  for (let a = 0; a < FM_A; a++) {
+    const th = (a * Math.PI) / FM_A, c = Math.cos(th), s = Math.sin(th);
+    let m = 0;
+    for (let r = 0; r < FM_R; r++) {
+      const rr = FM_RMIN * Math.exp(r * FM_LOGK);
+      const x = cx + rr * c, y = cy + rr * s;
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+      const v = mag[y0 * N + x0] * (1 - fx) * (1 - fy) + mag[y0 * N + x0 + 1] * fx * (1 - fy)
+        + mag[(y0 + 1) * N + x0] * (1 - fx) * fy + mag[(y0 + 1) * N + x0 + 1] * fx * fy;
+      out[a * FM_R + r] = v;
+      m += v;
+    }
+    // 角度ごとの平均を引いて、低周波の偏りを除く
+    m /= FM_R;
+    for (let r = 0; r < FM_R; r++) {
+      const win = 0.5 - 0.5 * Math.cos((2 * Math.PI * (r + 0.5)) / FM_R);
+      out[a * FM_R + r] = (out[a * FM_R + r] - m) * win;
+    }
+  }
+  f._lp = out;
+  return out;
+}
+
+// 画像を中心まわりに phi (rad) 回転し k 倍にした画像（同じ大きさ、はみ出しは平均値）
+function warpGray(img, phi, k) {
+  const { data, w, h } = img;
+  let mean = 0;
+  for (let i = 0; i < w * h; i++) mean += data[i];
+  mean /= w * h;
+  const out = new Float32Array(w * h);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  const c = Math.cos(phi), s = Math.sin(phi);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = (x - cx) / k, dy = (y - cy) / k;
+      const sx = c * dx + s * dy + cx, sy = -s * dx + c * dy + cy;
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      if (x0 < 0 || y0 < 0 || x0 >= w - 1 || y0 >= h - 1) { out[y * w + x] = mean; continue; }
+      const fx = sx - x0, fy = sy - y0, o = y0 * w + x0;
+      out[y * w + x] = data[o] * (1 - fx) * (1 - fy) + data[o + 1] * fx * (1 - fy)
+        + data[o + w] * (1 - fx) * fy + data[o + w + 1] * fx * fy;
+    }
+  }
+  return { data: out, w, h, scale: img.scale };
+}
+
+// b が a に対して回転・拡大縮小していないかを調べる。
+// 戻り値: { angle: 度（b を a に重ねるために回す角。-180〜180）, scale: b を a に重ねるための倍率, score } か null
+//   scale < 1 … b のほうが拡大されている（ズームインした）／ scale > 1 … 縮小されている
+// opts.minAngle (度) / opts.minScale (比率の差) 未満の違いは「なし」として null を返す
+export function diagnoseTransform(a, b, opts = {}) {
+  const minAngle = opts.minAngle ?? 3, minScale = opts.minScale ?? 0.04;
+  const la = logPolar(a), lb = logPolar(b);
+  const re = new Float64Array(FM_A * FM_R), im = new Float64Array(FM_A * FM_R);
+  {
+    const ar = Float64Array.from(la), ai = new Float64Array(la.length);
+    const br = Float64Array.from(lb), bi = new Float64Array(lb.length);
+    fft2d(ar, ai, FM_R, FM_A, false);
+    fft2d(br, bi, FM_R, FM_A, false);
+    for (let i = 0; i < re.length; i++) {
+      const r = ar[i] * br[i] + ai[i] * bi[i], m = ai[i] * br[i] - ar[i] * bi[i];
+      const mag = Math.hypot(r, m) + 1e-9;
+      re[i] = r / mag; im[i] = m / mag;
+    }
+    fft2d(re, im, FM_R, FM_A, true);
+  }
+  // 上位ピークを何本か候補にする
+  const peaks = [];
+  for (let y = 0; y < FM_A; y++) {
+    for (let x = 0; x < FM_R; x++) {
+      const v = re[y * FM_R + x];
+      if (peaks.length < 12 || v > peaks[peaks.length - 1].v) {
+        peaks.push({ x, y, v });
+        peaks.sort((p, q) => q.v - p.v);
+        if (peaks.length > 12) peaks.pop();
+      }
+    }
+  }
+  const tried = new Set();
+  const plain = coarseMatch(a, b, { candidates: 4 });
+  if (plain && plain.score >= 0.6) return null; // 平行移動だけで十分合う
+  let best = null;
+  const A = a.coarse, B = b.coarse;
+  for (const p of peaks.slice(0, 4)) {
+    if (best && best.score >= 0.7) break;
+    const sa = p.y >= FM_A / 2 ? p.y - FM_A : p.y;       // 角度方向（周期 π）
+    const sr = p.x >= FM_R / 2 ? p.x - FM_R : p.x;       // 対数半径方向
+    const dth = (sa * Math.PI) / FM_A;
+    const ls = sr * FM_LOGK;
+    for (const sg of [1, -1]) {
+      for (const inv of [1, -1]) {
+        for (const flip of [0, Math.PI]) {
+          const phi = sg * dth + flip, k = Math.exp(inv * ls);
+          const key = `${Math.round(phi * 40)}_${Math.round(Math.log(k) * 100)}`;
+          if (tried.has(key)) continue;
+          tried.add(key);
+          const warped = { w: B.w, h: B.h, _fft: null, coarse: warpGray(B, phi, k) };
+          const r = coarseMatch(a, warped, { candidates: 3 });
+          if (r && (!best || r.score > best.score)) {
+            let ang = (phi * 180) / Math.PI;
+            ang = ((ang + 180) % 360 + 360) % 360 - 180;
+            best = { angle: ang, scale: k, score: r.score };
+          }
+        }
+      }
+    }
+  }
+  if (!best) return null;
+  if (plain && plain.score >= best.score * 0.9) return null; // 回転・拡大なしでも同じくらい合う
+  const significant = Math.abs(best.angle) >= minAngle || Math.abs(Math.log(best.scale)) >= Math.log(1 + minScale);
+  return significant && best.score >= (opts.minScore ?? 0.4) ? best : null;
+}

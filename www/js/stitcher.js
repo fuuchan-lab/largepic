@@ -1,5 +1,5 @@
 // 新しい画像（フレーム）をモザイクのどこに置くかを決める
-import { makeFeatures, register, registerNear, coarseMatch, scalesFor } from './register.js';
+import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, scalesFor } from './register.js';
 import { makeThumb, canvasToBlob, nextFrame } from './imageutil.js';
 
 const overlapArea = (a, b) =>
@@ -59,6 +59,16 @@ export class Stitcher {
       await nextFrame();
     }
     return best;
+  }
+
+  // 矩形と重なっている配置済みタイル（重なりの大きい順）
+  overlapping(x, y, w, h) {
+    const rect = { x, y, w, h };
+    return this.mosaic.placed()
+      .map((t) => ({ t, a: overlapArea(rect, t) }))
+      .filter((o) => o.a > 0.05 * w * h)
+      .sort((p, q) => q.a - p.a)
+      .map((o) => o.t);
   }
 
   // 位置 (x,y) 付近で、重なっている既存タイルとの位置合わせを詰める
@@ -135,6 +145,23 @@ export class Tracker {
     this.lost = true;
     this.stats = { added: 0, lost: 0, frames: 0 };
     this.posHistory = [];  // 位置履歴（整合性チェック用）
+    this.tf = { hits: 0, last: null, lostFrames: 0 };  // 回転・拡大率の変化の検出状況
+  }
+
+  // feat と ref のあいだに回転・拡大率の違いがあれば記録する。2回続けて見つかったら true
+  checkTransform(ref, feat) {
+    let d = null;
+    try { d = diagnoseTransform(ref, feat); } catch (e) { console.warn(e); }
+    if (d) { this.tf.hits++; this.tf.last = d; } 
+    return this.tf.hits >= 2;
+  }
+
+  // 位置合わせに成功した（＝回転や拡大率の変化ではなかった）ので、疑いをリセット
+  clearTransform() { this.tf.hits = 0; this.tf.lostFrames = 0; }
+
+  transformResult(rect) {
+    const d = this.tf.last;
+    return { state: 'transform', rect, angle: d.angle, scale: d.scale };
   }
 
   get addThreshold() { return this.st.settings.addUncovered; }
@@ -174,8 +201,11 @@ export class Tracker {
         motion = Math.hypot(r.dx, r.dy);
         this.vel = { dx: r.dx, dy: r.dy };
         this.pos = { x: this.pos.x + r.dx, y: this.pos.y + r.dy };
+        this.tf.hits = Math.max(0, this.tf.hits - 1);
         this.ref = feat;
       } else {
+        // 直前のコマと平行移動で合わない：速すぎるスクロールのほか、回転・拡大率の変化も疑う
+        if (this.checkTransform(this.ref, feat)) return this.transformResult(rectAt(this.pos));
         this.lost = true;
         this.ref = null;
         this.vel = null;
@@ -187,7 +217,15 @@ export class Tracker {
       let order = this.mosaic.placed();
       if (this.pos) order = [...order].sort((a, b) => Math.hypot(a.x - this.pos.x, a.y - this.pos.y) - Math.hypot(b.x - this.pos.x, b.y - this.pos.y));
       const hit = await st.locate(feat, order);
-      if (!hit) { this.stats.lost++; return { state: 'lost', rect: rectAt(this.pos) }; }
+      if (!hit) {
+        this.stats.lost++;
+        // 取り込み済みの場所のはずなのに合わない：拡大率や向きが違う可能性（3コマに1回調べる）
+        if (this.tf.lostFrames++ % 3 === 0) {
+          for (const t of order.slice(0, 2)) if (this.checkTransform(t.feat, feat)) return this.transformResult(rectAt(this.pos));
+        }
+        return { state: 'lost', rect: rectAt(this.pos) };
+      }
+      this.clearTransform();
       this.pos = { x: hit.x, y: hit.y };
       this.ref = feat;
       this.lost = false;
@@ -207,6 +245,11 @@ export class Tracker {
       // 既存タイルと直接合わせ直して誤差の蓄積を防ぐ
       const fix = await st.refineAt(feat, this.pos.x, this.pos.y, 24);
       if (fix) this.pos = { x: fix.x, y: fix.y };
+      else if (unc < 0.7) {
+        // 既存タイルと十分重なる位置なのに合わない：回転・拡大率の変化を疑う
+        const over = st.overlapping(this.pos.x, this.pos.y, frame.w, frame.h)[0];
+        if (over && this.checkTransform(over.feat, feat)) return this.transformResult(rectAt(this.pos));
+      }
 
       // 複数フレーム整合性チェック：過去のフレームとの一貫性を確認
       if (this.posHistory.length >= 2) {

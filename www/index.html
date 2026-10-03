@@ -224,7 +224,7 @@
 
   <h3>撮影の前に</h3>
   <ul class="help">
-    <li><b>縮尺（拡大率）を決めてから</b>撮影を始める。撮影中は<b>拡大・縮小しない</b>。</li>
+    <li><b>縮尺（拡大率）を決めてから</b>撮影を始める。撮影中は<b>拡大・縮小しない</b>。<small>（地図が回転したり拡大率が変わったことを検出すると、自動で取り込みを止めて警告します）</small></li>
     <li>地図は<b>北を上に固定</b>（コンパスをタップ）。<b>回転・傾き（3D）はオフ</b>。</li>
     <li><b>現在地の追従をオフ</b>に。地図が勝手に動くとずれます。</li>
     <li>ピンや吹き出し、検索結果の一覧は閉じておく。</li>
@@ -273,6 +273,13 @@
     <li>設定の「位置合わせの厳しさ」を下げると合いやすくなります。</li>
   </ul>
   <div class="row end"><button data-close class="primary">閉じる</button></div>
+</dialog>
+
+<dialog id="dlgWarn">
+  <h2 id="warnTitle">撮影を停止しました</h2>
+  <p id="warnBody" class="sub"></p>
+  <ul class="help" id="warnList"></ul>
+  <div class="row end"><button id="warnOk" class="primary">OK</button></div>
 </dialog>
 
 <dialog id="dlgRestore">

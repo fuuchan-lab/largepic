@@ -111,6 +111,26 @@ const prog = {
 $('#progCancel').onclick = () => { prog.cancelled = true; };
 $('#dlgProgress').addEventListener('cancel', (e) => { e.preventDefault(); prog.cancelled = true; });
 
+// 地図の回転・拡大率の変化を見つけて取り込みを止めたときの警告
+function describeTransform(r) {
+  const parts = [];
+  if (Math.abs(r.angle) >= 3) parts.push(`地図が回転しています（約${Math.round(Math.abs(r.angle))}°）`);
+  if (Math.abs(Math.log(r.scale)) >= Math.log(1.04)) {
+    const z = r.scale < 1 ? 1 / r.scale : r.scale;
+    parts.push(`拡大率が変わっています（約${z.toFixed(1)}倍に${r.scale < 1 ? '拡大' : '縮小'}）`);
+  }
+  return parts.length ? parts : ['地図の向きまたは拡大率が変わっています'];
+}
+function showTransformWarning(r, where, extra) {
+  $('#warnTitle').textContent = '撮影を停止しました';
+  $('#warnBody').textContent = `${where}で、これまでの地図と合わなくなりました。${extra || ''}`;
+  $('#warnList').innerHTML = describeTransform(r).map((t) => `<li><b>${t}</b></li>`).join('')
+    + '<li>地図を<b>北上固定・回転オフ</b>にし、<b>拡大率は最初の撮影と同じ</b>にして、撮り直してください。</li>';
+  $('#warnOk').onclick = () => $('#dlgWarn').close();
+  const dlg = $('#dlgWarn');
+  if (!dlg.open) dlg.showModal();
+}
+
 async function askCrop(kind, source, sw, sh, opts) {
   const r = await editCrop($('#dlgCrop'), source, sw, sh, settings.crops[kind], opts);
   if (!r) return null;
@@ -180,6 +200,7 @@ async function seek(video, t) {
   await p;
 }
 
+let pendingWarn = null;
 // file: File または Blob（ネイティブの録画ファイル）
 async function addVideo(file) {
   if (!file || busy) return;
@@ -205,12 +226,14 @@ async function addVideo(file) {
     for (let t = start; t < end - step / 2; t += step) times.push(t);
     times.push(Math.max(start, end - 0.05));
     let fitted = !wasEmpty;
+    let stopped = null;
     for (let i = 0; i < times.length; i++) {
       const t = times[i];
       if (prog.cancelled) break;
       await seek(video, t);
       const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
       const r = await tracker.process(frame, { final: i === times.length - 1 });
+      if (r.state === 'transform') { stopped = { r, t }; break; }
       if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
       liveRect = r.rect; liveLost = r.state === 'lost';
       const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
@@ -222,7 +245,10 @@ async function addVideo(file) {
     liveRect = null;
     view.fit();
     const { added, lost } = tracker.stats;
-    if (!wasEmpty && added === 0) {
+    if (stopped) {
+      pendingWarn = [stopped.r, `動画の ${(stopped.t - start).toFixed(1)} 秒付近`,
+        added ? `ここまでの${added}枚は取り込み済みです。` : ''];
+    } else if (!wasEmpty && added === 0) {
       toast('取り込み済みの場所が見つからず、追加できませんでした。撮影の最初に取り込み済みの場所を映してください', 7000);
     } else {
       toast(`動画から${added}枚を取り込みました` + (lost > 3 ? `（${lost}コマは位置が分からずスキップ）` : ''), 5000);
@@ -232,6 +258,7 @@ async function addVideo(file) {
     toast('エラー: ' + err.message, 5000);
   } finally {
     prog.close();
+    if (pendingWarn) { showTransformWarning(...pendingWarn); pendingWarn = null; }
     video.removeAttribute('src');
     video.load();
     URL.revokeObjectURL(url);
@@ -375,6 +402,13 @@ async function liveLoop() {
         live.busyFrame = live.tracker.process(frame);
         const r = await live.busyFrame;
         if (!live.running) break;
+        if (r.state === 'transform') {
+          live.paused = true;
+          $('#btnLivePause').textContent = '再開';
+          setLiveState('lost', '停止中：地図が回転 / 拡大率が変わりました');
+          showTransformWarning(r, 'ライブ取り込み中', 'ここで取り込みを一時停止しました（［再開］で続けられます）。');
+          continue;
+        }
         liveRect = r.rect; liveLost = r.state === 'lost';
         view.liveRect = liveRect; view.lost = liveLost;
         if (!fitted && r.state === 'added') { view.fit(); fitted = true; }
@@ -444,7 +478,7 @@ $('#btnLivePause').onclick = () => {
   live.paused = !live.paused;
   $('#btnLivePause').textContent = live.paused ? '再開' : '一時停止';
   if (live.paused) setLiveState('paused', '一時停止中');
-  else live.tracker.lost = true; // 再開時は位置を探し直す
+  else { live.tracker.lost = true; live.tracker.clearTransform(); } // 再開時は位置を探し直す
 };
 $('#btnPip').onclick = openPip;
 
