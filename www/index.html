@@ -210,7 +210,11 @@
   <div class="row">
     <button id="btnClear" class="danger">すべて消去して新しく始める</button>
   </div>
-  <p class="sub small">作業内容はこの端末の中に自動保存されます（外部には送信しません）。</p>
+  <div class="row">
+    <button id="btnDiag">診断情報をコピー</button>
+  </div>
+  <p class="sub small">うまくつながらないときに、直前の取り込みの記録（位置・一致度など。画像は含みません）をコピーして、開発者に貼り付けて送れます。</p>
+  <p class="sub small">作業内容はこの端末の中に自動保存されます（外部には送信しません）。<br>バージョン <span id="appVersion"></span></p>
   <div class="row end"><button data-close class="primary">閉じる</button></div>
 </dialog>
 

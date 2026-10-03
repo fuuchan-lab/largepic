@@ -139,6 +139,8 @@ await page.evaluate(() => { window.largepic.settings.conflictBelow = 0.45; });
 await importVideo(vidC);   // 通常のしきい値で取り込み直す
 const n5 = await tiles();
 check(n5 >= 6, `通常のしきい値では矛盾せず取り込める (${n5}枚)`);
+const diag = await page.evaluate(() => JSON.parse(JSON.stringify(window.largepic.diagnostics())));
+check(diag.version && diag.lastImport.method && diag.mosaic.list.length === n5 && diag.lastImport.stats.added > 0, `診断情報に取り込みの記録とタイルの一覧が入る (${diag.lastImport.method}, ${diag.mosaic.list.length}枚)`);
 await page.click('#btnUndo');
 console.log(await page.evaluate(() => document.querySelector('#undoInfo').textContent));
 await page.click('#undo1');

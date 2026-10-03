@@ -12,6 +12,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
+const APP_VERSION = '2026-10-03.5';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -137,6 +138,7 @@ function showTransformWarning(r, where, extra) {
 
 // 絵の食い違い（矛盾）を見つけて止めたとき。選んだ操作をして 'stop' か 'continue' を返す
 function resolveConflict(r, where, batch) {
+  importLog.events.push({ type: 'conflict', where, score: +r.score.toFixed(3) });
   return new Promise((resolve) => {
     const dlg = $('#dlgConflict');
     const mine = mosaic.batchTiles(batch).length;
@@ -231,6 +233,8 @@ async function seek(video, t) {
 }
 
 let pendingWarn = null;
+// 直前の動画取り込みの記録（診断情報としてコピーできる）
+const importLog = { events: [] };
 // file: File または Blob（ネイティブの録画ファイル）
 async function addVideo(file) {
   if (!file || busy) return;
@@ -239,6 +243,9 @@ async function addVideo(file) {
   const url = URL.createObjectURL(file);
   const wasEmpty = !mosaic.tiles.length;
   const batch = mosaic.newBatch();
+  const t0Import = Date.now();
+  importLog.events = [];
+  Object.assign(importLog, { batch, file: file.name || '(blob)', size: file.size, startedAt: new Date().toISOString(), tilesBefore: mosaic.tiles.length });
   try {
     video.src = url;
     video.load();
@@ -267,14 +274,17 @@ async function addVideo(file) {
         onProgress: (p) => prog.set(p * 0.4, `動画を解析しています… ${Math.round(p * 100)}%`),
         isCancelled: () => prog.cancelled,
       });
+      Object.assign(importLog, { analysis: { mode: plan.mode, samples: plan.samples.length, brokenFraction: +plan.brokenFraction.toFixed(3), segments: new Set(plan.samples.map((q) => q.seg)).size } });
       if (!prog.cancelled && plan.samples.length >= 3 && plan.brokenFraction < 0.5) {
         keys = selectKeyframes(plan);
+        importLog.keyframes = keys.length;
         console.log(`解析(${plan.mode}): ${plan.samples.length}コマ → キーフレーム ${keys.length} 途切れ${Math.round(plan.brokenFraction * 100)}% 区間${new Set(plan.samples.map((q) => q.seg)).size}`);
         if (keys.length < 2) keys = null;
       }
     } catch (err) {
       console.warn('解析に失敗。全コマ方式に切り替えます', err);
       fallbackWhy = settings.fullScan ? '' : '（解析に失敗したため全コマ方式）';
+      importLog.analysisError = String(err && err.message || err);
     }
 
     if (keys) {
@@ -328,6 +338,7 @@ async function addVideo(file) {
     view.fit();
     const { added, lost } = tracker.stats;
     console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
+    Object.assign(importLog, { method: keys ? 'keyframes' : 'allframes', stats: tracker.stats, ms: Date.now() - t0Import, stopped: stopped ? (stopped.conflict ? 'conflict' : 'transform') : null });
     if (stopped?.conflict) {
       toast('矛盾が見つかったので取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
     } else if (stopped) {
@@ -882,6 +893,34 @@ $('#viewer100').onclick = () => viewer.actualSize();
 $('#expView').onclick = () => { if (lastFile) { $('#dlgExport').close(); openViewer(lastFile); } };
 window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#viewer').hidden) closeViewer(); });
 
+// ---------- 診断情報 ----------
+$('#appVersion').textContent = APP_VERSION;
+function diagnostics() {
+  return {
+    app: 'LargePic', version: APP_VERSION, time: new Date().toISOString(),
+    ua: navigator.userAgent, dpr: window.devicePixelRatio,
+    settings: { threshold: settings.threshold, videoStep: settings.videoStep, addUncovered: settings.addUncovered, conflictBelow: settings.conflictBelow, fullScan: !!settings.fullScan, crop: settings.crops.video },
+    lastImport: importLog,
+    mosaic: {
+      tiles: mosaic.tiles.length, coverage: +mosaic.coverage().toFixed(3), bbox: mosaic.bbox(),
+      list: mosaic.tiles.map((t) => ({ id: t.id, b: t.batch, x: t.x, y: t.y, w: t.w, h: t.h, conf: t.conf == null ? null : +t.conf.toFixed(2), weak: !!t.weak, placed: t.placed, t: t.vt == null ? null : +t.vt.toFixed(2) })),
+    },
+  };
+}
+$('#btnDiag').onclick = async () => {
+  const text = JSON.stringify(diagnostics());
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('診断情報をコピーしました。チャットなどに貼り付けて送ってください', 5000);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch { /* */ }
+    ta.remove();
+    toast(ok ? '診断情報をコピーしました' : 'コピーできませんでした', 4000);
+  }
+};
+
 // ---------- 起動 ----------
 async function boot() {
   updateStats();
@@ -920,4 +959,4 @@ if ('serviceWorker' in navigator && location.protocol === 'https:' && !isNative)
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 // テスト・デバッグ用
-window.largepic = { mosaic, view, stitcher, settings, store, trim, computeTrim, viewer };
+window.largepic = { mosaic, view, stitcher, settings, store, trim, computeTrim, viewer, importLog, diagnostics };

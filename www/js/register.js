@@ -260,7 +260,42 @@ function coarseCandidates(a, b, opts) {
   }
   for (const r of scored) r.adj = adjusted(r, opts.prior, A);
   scored.sort((p, q) => q.adj - p.adj);
+  if (opts.prior && scored.length) {
+    const t = scored[0];
+    const sn = snapToPrior(A, A, B, t.dx, t.dy, { dx: opts.prior.dx * A.scale, dy: opts.prior.dy * A.scale }, { stride: 1 });
+    t.dx = sn.dx; t.dy = sn.dy;
+  }
   return scored;
+}
+
+
+// 開口問題への対処：海岸線や等高線のような「一本の線」しか映っていないと、線に沿ってずらしても
+// 同じくらいよく合ってしまい、位置が決まらない。その向き（合い方がほとんど変わらない範囲）では、
+// 測定値ではなく直前の動き（prior）に最も近い位置を選ぶ（等速で動いたと見なす）。
+// L: 位置合わせに使う解像度の画像 {data,w,h}、(dx,dy): 今の推定、prior: 期待する移動量（同じ単位）
+function snapToPrior(L, A, B, dx, dy, prior, { range = 0.45, stride = 2, tol = 0.04 } = {}) {
+  if (!prior) return { dx, dy };
+  const base = ncc(A, B, dx, dy, stride);
+  if (!(base.raw > 0.3)) return { dx, dy };
+  const R = Math.round(range * Math.min(A.w, A.h));
+  const scan = (axis, sign) => {
+    let k = 0;
+    for (let i = 1; i <= R; i++) {
+      const r = ncc(A, B, dx + (axis === 'x' ? sign * i : 0), dy + (axis === 'y' ? sign * i : 0), stride);
+      if (r.overlap < 0.1 || !(r.raw >= base.raw - tol)) break;
+      k = i;
+    }
+    return k;
+  };
+  let nx = dx, ny = dy;
+  for (const axis of ['y', 'x']) {
+    const lo = scan(axis, -1), hi = scan(axis, 1);
+    if (lo + hi === 0) continue;
+    const cur = axis === 'x' ? nx : ny, want = axis === 'x' ? prior.dx : prior.dy;
+    const t = Math.max(cur - lo, Math.min(cur + hi, Math.round(want)));
+    if (axis === 'x') nx = t; else ny = t;
+  }
+  return { dx: nx, dy: ny };
 }
 
 // 候補の総合点：重なりが小さい一致は割り引き、直前の動き（prior）から外れる候補は減点する。
@@ -294,6 +329,18 @@ export function register(a, b, opts = {}) {
     const adj = adjusted(r, opts.prior, L);
     if (adj > bestAdj) { best = r; bestAdj = adj; }
     if (best && best.score > 0.85 && best.overlap >= 0.5) break;
+  }
+  // 位置が決まらない向きは、直前の動きに合わせる（中解像度で範囲を調べ、全解像度で仕上げる）
+  if (best && opts.prior && a.mid && b.mid) {
+    const m = a.mid.scale;
+    const dxm = Math.round(best.dx * m), dym = Math.round(best.dy * m);
+    const sn = snapToPrior(a.mid, a.mid, b.mid, dxm, dym, { dx: opts.prior.dx * m, dy: opts.prior.dy * m });
+    if (sn.dx !== dxm || sn.dy !== dym) {
+      const nx = Math.round(best.dx + (sn.dx - dxm) / m), ny = Math.round(best.dy + (sn.dy - dym) / m);
+      const fine = (a.full && b.full)
+        ? searchLocal(a.full, b.full, nx, ny, Math.ceil(1 / m) + 1, minOverlap * 0.7, 3, 1) : null;
+      best = fine ? { ...fine } : { ...best, dx: nx, dy: ny };
+    }
   }
   return best; // {dx, dy, score, overlap} | null
 }
