@@ -171,6 +171,7 @@
   <p id="expWarn" class="warn"></p>
   <div id="expResult" class="exp-result" hidden>
     <p id="expDone"></p>
+    <p id="expLib" class="sub small" hidden>✔ この端末の［🔍 閲覧］の一覧にも入りました。いつでもビューアで見られます。</p>
     <div class="row">
       <a id="expDownload" class="button primary" download>ダウンロード</a>
       <button id="expShare" hidden>共有 / 写真に保存</button>
@@ -335,12 +336,26 @@
   </div>
 </dialog>
 
+<!-- 保存した画像の一覧（閲覧の入口） -->
+<div id="gallery" class="gallery" hidden>
+  <div class="gallery-top">
+    <button id="galleryClose">✕ 閉じる</button>
+    <h2>保存した画像</h2>
+    <button id="galleryOpenFile">ファイルから開く</button>
+  </div>
+  <div id="galleryList" class="gallery-list"></div>
+  <p id="galleryEmpty" class="gallery-empty" hidden>
+    保存した画像はまだありません。<br>画像を保存（書き出し）すると、ここに自動で入ります。<br>別の場所にある画像は［ファイルから開く］で見られます。
+  </p>
+  <p id="galleryUsage" class="sub small gallery-usage"></p>
+</div>
+
 <!-- 大きな画像のビューア -->
 <div id="viewer" class="viewer" hidden>
   <canvas id="viewerCanvas"></canvas>
   <div class="viewer-top">
     <button id="viewerClose">✕ 閉じる</button>
-    <button id="viewerOpen">別の画像を開く</button>
+    <button id="viewerOpen">一覧へ</button>
     <span id="viewerInfo" class="viewer-info"></span>
   </div>
   <div class="viewer-ctl">

@@ -89,7 +89,8 @@ const hole = await page.evaluate(() => {
   const { mosaic } = window.largepic;
   const bb = mosaic.bbox();
   for (let tries = 0; tries < 400; tries++) {
-    const px = bb.x + 100 + Math.random() * (bb.w - 200), py = bb.y + 60 + Math.random() * (bb.h - 120);
+    // 画像の端から十分内側で、毎回同じ順序で探す（端だと範囲の外側の未取得が混ざるため）
+    const px = bb.x + 120 + ((tries * 0.6180339) % 1) * (bb.w - 240), py = bb.y + 120 + ((tries * 0.7548776) % 1) * (bb.h - 240);
     const cover = mosaic.tiles.filter((t) => px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h);
     if (cover.length < 2) continue;
     // これらを消したあとの、点まわり 160×160 の未取得面積

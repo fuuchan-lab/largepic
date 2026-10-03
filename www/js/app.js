@@ -4,6 +4,7 @@ import { Stitcher, Tracker } from './stitcher.js';
 import { analyzeVideo, selectKeyframes } from './analyze.js';
 import { ImageViewer } from './viewer.js';
 import { exportTiles } from './tiles.js';
+import { library } from './library.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -12,7 +13,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.6';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.7';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -707,7 +708,7 @@ document.querySelectorAll('[data-action]').forEach((b) => {
     if (busy) return toast('処理中です');
     if (a === 'capture') openCapture(mosaic.tiles.length > 0 && coverage < 0.995);
     if (a === 'images') $('#fileImages').click();
-    if (a === 'viewer') $('#fileView').click();
+    if (a === 'viewer') openGallery();
   });
 });
 $('#fileImages').onchange = (e) => { const f = [...e.target.files]; e.target.value = ''; addImages(f); };
@@ -875,6 +876,7 @@ $('#expGo').onclick = async () => {
   $('#expResult').hidden = false;
   $('#expDownload').hidden = true;
   $('#expShare').hidden = true;
+  $('#expLib').hidden = true;
   try {
     const d = new Date();
     const p2 = (n) => String(n).padStart(2, '0');
@@ -897,6 +899,8 @@ $('#expGo').onclick = async () => {
     const ext = tiled ? 'zip' : (type === 'image/png' ? 'png' : 'jpg');
     const name = `LargePic-${stamp}${tiled ? '-tiles' : ''}.${ext}`;
     lastFile = new File([blob], name, { type });
+    const r0 = trim.rect;
+    saveToLibrary(lastFile, tiled ? 'tiles' : 'image', Math.round(r0.w * scale), Math.round(r0.h * scale));
     const a = $('#expDownload');
     a.href = lastUrl;
     a.download = name;
@@ -943,16 +947,90 @@ function closeViewer() {
   viewer.dispose();
   $('#viewer').hidden = true;
 }
-$('#btnViewer').onclick = () => $('#fileView').click();
-$('#fileView').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) openViewer(f); };
-$('#viewerClose').onclick = closeViewer;
-$('#viewerOpen').onclick = () => $('#fileView').click();
+// 書き出した画像を、この端末のライブラリにも入れる（［閲覧］の一覧で優先して開ける）
+async function saveToLibrary(file, kind, width, height) {
+  try {
+    await library.add({ name: file.name, blob: file, kind, width, height });
+    $('#expLib').hidden = false;
+  } catch (e) {
+    console.warn('ライブラリに保存できませんでした', e);
+    $('#expLib').hidden = true;
+    toast('端末の保存領域に入りませんでした。「ダウンロード」で保存してください', 6000);
+  }
+}
+// ---- 保存した画像の一覧（閲覧の入口）----
+let viewerFromGallery = false;
+const fmtSize = (n) => (n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB');
+const thumbUrls = [];
+async function openGallery() {
+  $('#gallery').hidden = false;
+  const listEl = $('#galleryList');
+  thumbUrls.splice(0).forEach((u) => URL.revokeObjectURL(u));
+  listEl.innerHTML = '';
+  let items = [];
+  try { items = await library.list(); } catch (e) { console.warn(e); }
+  $('#galleryEmpty').hidden = items.length > 0;
+  for (const it of items) {
+    const card = document.createElement('div');
+    card.className = 'gcard';
+    const url = it.thumb ? URL.createObjectURL(it.thumb) : '';
+    if (url) thumbUrls.push(url);
+    const d = new Date(it.createdAt);
+    const p2 = (n) => String(n).padStart(2, '0');
+    card.innerHTML = `<button class="gthumb" aria-label="開く" style="${url ? `background-image:url(${url})` : ''}"></button>
+      <div class="ginfo"><b></b>${it.kind === 'tiles' ? '<span class="gbadge">分割</span>' : ''}${it.width.toLocaleString()}×${it.height.toLocaleString()}px<br>${fmtSize(it.size)} ・ ${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}</div>
+      <div class="gbtns"><button data-act="dl">保存</button><button data-act="del" class="danger">削除</button></div>`;
+    card.querySelector('b').textContent = it.name;
+    card.querySelector('.gthumb').onclick = async () => {
+      const blob = await library.blob(it.id);
+      if (!blob) return toast('ファイルが見つかりません', 3000);
+      viewerFromGallery = true;
+      $('#gallery').hidden = true;
+      openViewer(new File([blob], it.name, { type: blob.type }));
+    };
+    card.querySelector('[data-act=dl]').onclick = async () => {
+      const blob = await library.blob(it.id);
+      if (!blob) return;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = it.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    };
+    card.querySelector('[data-act=del]').onclick = async () => {
+      if (!confirm(`「${it.name}」を削除しますか？（この端末のライブラリから消えます）`)) return;
+      await library.remove(it.id);
+      openGallery();
+    };
+    listEl.appendChild(card);
+  }
+  const u = await library.usage();
+  $('#galleryUsage').textContent = u ? `この端末の保存領域：${fmtSize(u.used)} 使用中（上限の目安 ${fmtSize(u.quota)}）` : '';
+}
+function closeGallery() {
+  $('#gallery').hidden = true;
+  thumbUrls.splice(0).forEach((u) => URL.revokeObjectURL(u));
+}
+$('#btnViewer').onclick = () => openGallery();
+$('#galleryClose').onclick = closeGallery;
+$('#galleryOpenFile').onclick = () => $('#fileView').click();
+$('#fileView').onchange = (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  viewerFromGallery = !$('#gallery').hidden;   // 一覧から開いたなら、閉じたときに一覧へ戻る
+  closeGallery();
+  openViewer(f);
+};
+$('#viewerClose').onclick = () => { const back = viewerFromGallery; closeViewer(); if (back) openGallery(); };
+$('#viewerOpen').onclick = () => { closeViewer(); openGallery(); };
 $('#viewerZoomIn').onclick = () => viewer.zoomBy(1.6);
 $('#viewerZoomOut').onclick = () => viewer.zoomBy(1 / 1.6);
 $('#viewerFit').onclick = () => viewer.fit();
 $('#viewer100').onclick = () => viewer.actualSize();
 $('#expView').onclick = () => { if (lastFile) { $('#dlgExport').close(); openViewer(lastFile); } };
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#viewer').hidden) closeViewer(); });
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('#viewer').hidden) $('#viewerClose').click();
+  else if (!$('#gallery').hidden) closeGallery();
+});
 
 // ---------- 診断情報 ----------
 $('#appVersion').textContent = APP_VERSION;
