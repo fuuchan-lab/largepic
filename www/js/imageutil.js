@@ -26,17 +26,21 @@ let work = null;
 // source を切り抜いて作業用キャンバスに描き、グレースケールも返す
 // （キャンバスは使い回すので、必要なら呼び出し側ですぐ使うこと）
 import { perf } from './perf.js';
-export function grabFrame(source, sw, sh, crop) {
-  return perf.timeSync('grab', () => grabFrameImpl(source, sw, sh, crop));
+import { maskPx, flattenGray } from './mask.js';
+export function grabFrame(source, sw, sh, crop, mask = null) {
+  return perf.timeSync('grab', () => grabFrameImpl(source, sw, sh, crop, mask));
 }
-function grabFrameImpl(source, sw, sh, crop) {
+function grabFrameImpl(source, sw, sh, crop, mask) {
   const r = cropRect(sw, sh, crop);
   if (!work) work = newCanvas(1, 1);
   if (work.width !== r.w || work.height !== r.h) { work.width = r.w; work.height = r.h; }
   const ctx = work.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(source, r.sx, r.sy, r.w, r.h, 0, 0, r.w, r.h);
   const gray = toGray(ctx.getImageData(0, 0, r.w, r.h).data, r.w * r.h);
-  return { canvas: work, gray, w: r.w, h: r.h, rect: r };
+  // 記録しない領域：位置合わせ用の濃淡はならしておき、タイルにするときに画像を透明にする
+  const m = mask && mask.on ? maskPx(mask, r.w, r.h) : null;
+  if (m) flattenGray(gray, r.w, r.h, m);
+  return { canvas: work, gray, w: r.w, h: r.h, rect: r, mask: m };
 }
 
 export function grayOf(bitmap) {

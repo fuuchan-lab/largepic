@@ -2,6 +2,7 @@
 import { makeFeatures, register, registerNear, coarseMatch, diagnoseTransform, ncc, scalesFor } from './register.js';
 import { makeThumb, canvasToBlob, nextFrame } from './imageutil.js';
 import { perf } from './perf.js';
+import { punchMask } from './mask.js';
 
 const overlapArea = (a, b) =>
   Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) *
@@ -24,12 +25,14 @@ export class Stitcher {
   // frame.canvas の内容からタイルを作る。srcBlob があればそれを元画像として使う
   async makeTile(frame, feat, srcBlob, x, y, placed) {
     let src = srcBlob, sx = frame.rect.sx, sy = frame.rect.sy;
+    // 記録しない領域（ポインターやキャラクターなど）は、画像を透明にして残す。元のファイルは使えないので PNG にし直す
+    if (frame.mask) { punchMask(frame.canvas.getContext('2d'), frame.mask); src = null; }
     if (!src) {
       src = await perf.time('tile.png', () => canvasToBlob(frame.canvas, 'image/png', 1));
       sx = 0; sy = 0;
     }
     const { bmp, scale } = await perf.time('tile.thumb', () => makeThumb(frame.canvas, frame.w, frame.h, this.settings.thumbSize));
-    const tile = { x, y, w: frame.w, h: frame.h, placed, thumb: bmp, thumbScale: scale, src, sx, sy, feat };
+    const tile = { x, y, w: frame.w, h: frame.h, placed, thumb: bmp, thumbScale: scale, src, sx, sy, feat, mask: frame.mask || null };
     this.mosaic.add(tile);
     this.mosaic.touchFullGray(tile);
     return tile;
@@ -342,7 +345,7 @@ export class Tracker {
     }
 
     if (opts.kpos) this.kAnchor = { kx: opts.kpos.x, ky: opts.kpos.y, px: this.pos.x, py: this.pos.y };
-    const { frac: unc, area: uncArea } = this.mosaic.uncoveredArea(this.pos.x, this.pos.y, frame.w, frame.h);
+    const { frac: unc, area: uncArea } = this.mosaic.uncoveredArea(this.pos.x, this.pos.y, frame.w, frame.h, frame.mask);
     const small = Math.min(frame.w, frame.h);
     const still = motion <= Math.max(2, small * 0.015);
     const fast = motion > small * 0.08;

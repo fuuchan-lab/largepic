@@ -1,13 +1,14 @@
 import { Mosaic } from './mosaic.js';
 import { View, drawOverview } from './view.js';
 import { Stitcher, Tracker } from './stitcher.js';
-import { analyzeVideo, selectKeyframes, makeKeyReader } from './analyze.js';
+import { analyzeVideo, selectKeyframes, makeKeyReader, detectStatic } from './analyze.js';
 import { ImageViewer } from './viewer.js';
 import { exportTiles } from './tiles.js';
 import { library } from './library.js';
 import { keepAwake, sleep } from './awake.js';
 import { jobs } from './jobs.js';
 import { perf } from './perf.js';
+import { DEFAULT_MASK } from './mask.js';
 import { editCrop, PRESETS } from './cropdialog.js';
 import { grabFrame, decodeBitmap, isIOS, isMobile, nextFrame } from './imageutil.js';
 import { ProjectStore } from './store.js';
@@ -16,7 +17,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.9';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-03.10';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -27,11 +28,12 @@ const DEFAULTS = {
   thumbSize: 640,
   bgColor: 'black',
   crops: { image: PRESETS.phone, video: PRESETS.phone, live: PRESETS.desktop },
+  mask: { ...DEFAULT_MASK },   // 記録しない領域（ポインター・キャラクターなど、画面の同じ位置に居続ける物）
 };
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(APP + '.settings') || '{}');
-    return { ...DEFAULTS, ...s, crops: { ...DEFAULTS.crops, ...(s.crops || {}) } };
+    return { ...DEFAULTS, ...s, crops: { ...DEFAULTS.crops, ...(s.crops || {}) }, mask: { ...DEFAULT_MASK, ...(s.mask || {}) } };
   } catch {
     return structuredClone(DEFAULTS);
   }
@@ -215,9 +217,10 @@ function shouldStopLost(tracker, r, limit) {
 }
 
 async function askCrop(kind, source, sw, sh, opts) {
-  const r = await editCrop($('#dlgCrop'), source, sw, sh, settings.crops[kind], opts);
+  const r = await editCrop($('#dlgCrop'), source, sw, sh, settings.crops[kind], { ...opts, mask: settings.mask, detect: opts && opts.video ? (crop, cb) => detectStatic(opts.video, crop, { start: opts.start ?? 0, end: opts.video.duration, seek: seek0, ...cb }) : null });
   if (!r) return null;
   settings.crops[kind] = r.crop;
+  settings.mask = r.mask;
   saveSettings();
   return r;
 }
@@ -244,7 +247,7 @@ async function addImages(files) {
       if (i === 0) prog.open('画像をつなげています…');
       prog.set(i / files.length, `${i + 1} / ${files.length} 枚目`);
       await nextFrame();
-      const frame = grabFrame(bmp, w, h, crop);
+      const frame = grabFrame(bmp, w, h, crop, settings.mask);
       bmp.close?.();
       const r = await stitcher.addStill(frame, files[i]);
       counts[r]++;
@@ -311,10 +314,11 @@ async function addVideo(file, resume = null) {
     const dur = video.duration;
     if (!isFinite(dur) || !video.videoWidth) throw new Error('この動画は読み込めませんでした');
     await seek(video, Math.min(0.2, dur / 2));
-    const sel = resume ? { crop: resume.crop, start: resume.start, end: resume.end }
+    const sel = resume ? { crop: resume.crop, start: resume.start, end: resume.end, mask: resume.mask }
       : await askCrop('video', video, video.videoWidth, video.videoHeight, { video });
     if (!sel) return;
     const { crop, start, end } = sel;
+    const mask = sel.mask || { ...DEFAULT_MASK };
     const tracker = new Tracker(stitcher);
     prog.open(wasEmpty ? '動画からつなげています…' : '追加の動画を取り込んでいます…');
     const step = settings.videoStep;
@@ -329,14 +333,16 @@ async function addVideo(file, resume = null) {
       if (settings.fullScan) throw new Error('全コマ方式（設定）');
       prog.set(0, '動画を解析しています…');
       const plan = await perf.time('analysis', () => analyzeVideo(video, crop, {
-        start, end, step: Math.min(0.12, step), threshold: settings.threshold,
+        mask, start, end, step: Math.min(0.12, step), threshold: settings.threshold,
         onProgress: (p) => prog.set(p * 0.4, `動画を解析しています… ${Math.round(p * 100)}%`),
         isCancelled: () => prog.cancelled,
       }));
-      Object.assign(importLog, { analysis: { mode: plan.mode, samples: plan.samples.length, brokenFraction: +plan.brokenFraction.toFixed(3), segments: new Set(plan.samples.map((q) => q.seg)).size } });
+      Object.assign(importLog, { analysis: { lastT: plan.samples.length ? +plan.samples[plan.samples.length - 1].t.toFixed(2) : null, duration: +video.duration.toFixed(2), mode: plan.mode, samples: plan.samples.length, brokenFraction: +plan.brokenFraction.toFixed(3), segments: new Set(plan.samples.map((q) => q.seg)).size } });
       if (!prog.cancelled && plan.samples.length >= 3 && plan.brokenFraction < 0.5) {
-        keys = selectKeyframes(plan);
+        // マスクがあるときは、隠れた所が次のコマで見えるよう、コマの間隔をせまくする
+        keys = selectKeyframes(plan, { minOverlap: mask.on ? 0.6 : 0.4 });
         importLog.keyframes = keys.length;
+        importLog.lastKeyT = +keys[keys.length - 1].t.toFixed(2);
         console.log(`解析(${plan.mode}): ${plan.samples.length}コマ → キーフレーム ${keys.length} 途切れ${Math.round(plan.brokenFraction * 100)}% 区間${new Set(plan.samples.map((q) => q.seg)).size}`);
         if (keys.length < 2) keys = null;
       }
@@ -351,9 +357,9 @@ async function addVideo(file, resume = null) {
     if (keys) {
       // 途中経過を端末に残す：ブラウザが裏でページを止めても、戻ったときに続きから取り込める
       if (resume) jobActive = true;
-      else jobActive = await jobs.start({ keys, crop, start, end, batch, wasEmpty, name: file.name || '動画' }, file);
+      else jobActive = await jobs.start({ keys, crop, mask, start, end, batch, wasEmpty, name: file.name || '動画' }, file);
       // 2) 選んだコマだけを高解像度で取り込む（解析で分かった移動量を位置合わせのヒントに使う）
-      const reader = makeKeyReader(video, () => grabFrame(video, video.videoWidth, video.videoHeight, crop), seek0);
+      const reader = makeKeyReader(video, () => grabFrame(video, video.videoWidth, video.videoHeight, crop, mask), seek0);
       const i0 = resume ? Math.min(resume.next, keys.length - 1) : 0;
       if (resume) keys[i0] = { ...keys[i0], newSeg: true };   // 続きの最初は、取り込み済みの場所から探し直す
       for (let i = i0; i < keys.length; i++) {
@@ -391,7 +397,7 @@ async function addVideo(file, resume = null) {
         const t = times[i];
         if (prog.cancelled) break;
         await seek(video, t);
-        const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
+        const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop, mask);
         const r = await tracker.process(frame, { final: i === times.length - 1 });
         if (r.state === 'transform') { stopped = { r, t }; break; }
         if (shouldStopLost(tracker, r, LOST_LIMIT.all)) {
@@ -565,7 +571,7 @@ async function startLive() {
   if (!sel) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; return; }
   setBusy(true);
   live.batch = mosaic.newBatch();
-  Object.assign(live, { stream, running: true, paused: false, tracker: new Tracker(stitcher), crop: sel.crop });
+  Object.assign(live, { stream, running: true, paused: false, tracker: new Tracker(stitcher), crop: sel.crop, mask: settings.mask });
   stream.getVideoTracks()[0].addEventListener('ended', stopLive);
   $('#livebar').hidden = false;
   $('#btnPip').hidden = !('documentPictureInPicture' in window);
@@ -580,7 +586,7 @@ async function liveLoop() {
     const t0 = performance.now();
     if (!live.paused && video.videoWidth) {
       try {
-        const frame = grabFrame(video, video.videoWidth, video.videoHeight, live.crop);
+        const frame = grabFrame(video, video.videoWidth, video.videoHeight, live.crop, live.mask);
         live.busyFrame = live.tracker.process(frame);
         const r = await live.busyFrame;
         if (!live.running) break;
@@ -644,7 +650,7 @@ async function stopLive() {
   if (!live.paused && video.videoWidth && live.stream?.active) {
     try {
       await live.busyFrame;
-      await live.tracker.process(grabFrame(video, video.videoWidth, video.videoHeight, live.crop), { final: true });
+      await live.tracker.process(grabFrame(video, video.videoWidth, video.videoHeight, live.crop, live.mask), { final: true });
     } catch { /* */ }
   }
   live.stream?.getTracks().forEach((t) => t.stop());

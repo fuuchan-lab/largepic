@@ -7,6 +7,7 @@ import { cropRect, newCanvas } from './imageutil.js';
 import { coarseMatch, scalesFor } from './register.js';
 import { yieldNow } from './awake.js';
 import { perf } from './perf.js';
+import { maskPx, flattenGray, inMask } from './mask.js';
 
 const ANALYSIS_SIDE = 112;   // 解析用に縮小した画像の長辺（px）
 
@@ -20,13 +21,14 @@ function waitSeeked(video, t, ms = 4000) {
 }
 
 // 縮小して粗い特徴（register.js の coarse と同じ形）を作る
-function makeGrabber(video, crop) {
+function makeGrabber(video, crop, mask = null) {
   const r = cropRect(video.videoWidth, video.videoHeight, crop);
   const sc = Math.min(1, ANALYSIS_SIDE / Math.max(r.w, r.h));   // 解析用の画像は小さくてよい（位置の細かい合わせは本番の取り込みでやる）
   const cw = Math.max(8, Math.round(r.w * sc)), ch = Math.max(8, Math.round(r.h * sc));
   const cv = newCanvas(cw, ch);
   const ctx = cv.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingQuality = 'medium';
+  const m = mask && mask.on ? maskPx(mask, cw, ch, 1) : null;   // 記録しない領域は、解析でも使わない
   return {
     w: r.w, h: r.h, scale: cw / r.w,
     grab() {
@@ -34,6 +36,7 @@ function makeGrabber(video, crop) {
       const d = ctx.getImageData(0, 0, cw, ch).data;
       const g = new Float32Array(cw * ch);
       for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) / 256;
+      if (m) flattenGray(g, cw, ch, m);
       return { w: r.w, h: r.h, _fft: null, coarse: { data: g, w: cw, h: ch, scale: cw / r.w } };
     },
   };
@@ -50,7 +53,7 @@ async function collectByPlayback(video, grabber, { start, end, step, onProgress,
   video.playbackRate = 2;
   try { await video.play(); } catch { video.playbackRate = prevRate; return false; }
   return new Promise((resolve) => {
-    let last = -Infinity, lastCb = performance.now(), finished = false;
+    let last = -Infinity, lastCb = performance.now(), finished = false, lastMedia = -Infinity;
     const finish = (val) => {
       if (finished) return;
       finished = true;
@@ -67,6 +70,7 @@ async function collectByPlayback(video, grabber, { start, end, step, onProgress,
       if (finished) return;
       lastCb = performance.now();
       const t = meta.mediaTime;
+      lastMedia = t;
       if (t - last >= step * 0.9 && t >= start - 1e-3 && t <= end + 1e-3) {
         const t0 = performance.now();
         onSample({ t, feat: grabber.grab() });
@@ -84,7 +88,15 @@ async function collectByPlayback(video, grabber, { start, end, step, onProgress,
       }
       video.requestVideoFrameCallback(cb);
     };
-    video.addEventListener('ended', () => finish(true), { once: true });
+    video.addEventListener('ended', () => {
+      // 動画の最後のコマは、再生中のコールバックが来ないことがある。終わった時点で表示されている最後のコマを、
+      // 動画の長さの時刻のコマとして取る（端まで取り込むため）
+      if (!finished && end >= video.duration - 0.05 && video.duration - last > 0.03) {
+        onSample({ t: video.duration, feat: grabber.grab() });
+        count++;
+      }
+      finish(true);
+    }, { once: true });
     video.requestVideoFrameCallback(cb);
   });
 }
@@ -102,7 +114,7 @@ async function collectBySeek(video, grabber, { start, end, step, onProgress, isC
 // 解析：サンプルごとの位置（区間ごとの相対座標）を求める
 // 戻り値: { samples: [{t, x, y, seg, speed}], w, h, brokenFraction }
 export async function analyzeVideo(video, crop, opts) {
-  const grabber = makeGrabber(video, crop);
+  const grabber = makeGrabber(video, crop, opts.mask);
   const step = opts.step ?? 0.1;
   const sc = grabber.scale;
   const threshold = (opts.threshold ?? 0.55) * 0.85;
@@ -227,6 +239,7 @@ export function makeKeyReader(video, grabFull, seek) {
   const bySeek = async (t, why = '') => { perf.add('key.bySeek' + why, 0); video.pause(); await seek(video, t); return grabFull(); };
   return {
     async get(t) {
+      if (t >= video.duration - 1e-3) return bySeek(t, '(last)');   // 動画の最後のコマは、シークで確実に取る
       if (broken || video.currentTime > t + 0.02) return bySeek(t, broken ? '(broken)' : '(back)');   // すでに過ぎた時刻（逆戻り）はシーク
       return new Promise((resolve) => {
         let done = false, lastCb = performance.now();
@@ -254,4 +267,89 @@ export function makeKeyReader(video, grabFull, seek) {
       });
     },
   };
+}
+
+// 動画の中で「画面の同じ位置に居続ける物」（ポインター・キャラクターなど）を見つける。
+// 地図が動いても動かない、模様のある画素を数え、まとまった領域（連結成分）を探して、記録しない領域の案にする。
+// 戻り値: { found: true, mask: { shape, cx, cy, rw, rh } } または { found: false, reason }
+export async function detectStatic(video, crop, { start = 0, end, seek, onProgress, maxSamples = 40 } = {}) {
+  const grabber = makeGrabber(video, crop, null);
+  const dur = Math.max(0.5, end - start);
+  const n = Math.min(maxSamples, Math.max(8, Math.round(dur / 0.25)));
+  const feats = [];
+  for (let i = 0; i < n; i++) {
+    await seek(video, start + dur * (i + 0.5) / n);
+    feats.push(grabber.grab());
+    onProgress?.(i / n * 0.7);
+    await yieldNow();
+  }
+  const W = feats[0].coarse.w, H = feats[0].coarse.h, N = W * H;
+  const textured = new Uint16Array(N), equal = new Uint16Array(N);
+  let pairs = 0;
+  for (let i = 0; i + 1 < n; i++) {
+    const a = feats[i], b = feats[i + 1];
+    const r = coarseMatch(a, b, { candidates: 6 });
+    if (!r || r.score < 0.5 || Math.hypot(r.dx, r.dy) < 3) continue;   // 地図が動いていないコマの組は、判断できないので使わない
+    pairs++;
+    const da = a.coarse.data, db = b.coarse.data;
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        const p = y * W + x;
+        if (Math.abs(da[p + 1] - da[p - 1]) + Math.abs(da[p + W] - da[p - W]) > 14) {   // 模様のある画素だけ（無地の海などは数えない）
+          textured[p]++;
+          if (Math.abs(da[p] - db[p]) < 7) equal[p]++;
+        }
+      }
+    }
+    onProgress?.(0.7 + 0.2 * (i / n));
+    await yieldNow();
+  }
+  if (pairs < 3) return { found: false, reason: '地図が動いているコマが足りません。スクロールしている動画で試してください。' };
+  // 動かない画素
+  const st = new Uint8Array(N);
+  for (let p = 0; p < N; p++) if (textured[p] >= Math.max(3, pairs * 0.5) && equal[p] >= 0.85 * textured[p]) st[p] = 1;
+  // 少し太らせて、近くの画素をつなげる
+  const dilate = (src) => {
+    const o = new Uint8Array(N);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const p = y * W + x;
+      if (src[p] || src[p - 1] || src[p + 1] || src[p - W] || src[p + W] || src[p - W - 1] || src[p - W + 1] || src[p + W - 1] || src[p + W + 1]) o[p] = 1;
+    }
+    return o;
+  };
+  const d2 = dilate(dilate(st));
+  // 連結成分
+  const label = new Int32Array(N).fill(-1);
+  const comps = [];
+  for (let p0 = 0; p0 < N; p0++) {
+    if (!d2[p0] || label[p0] >= 0) continue;
+    const id = comps.length;
+    const stack = [p0]; label[p0] = id;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0, area = 0, raw = 0;
+    while (stack.length) {
+      const p = stack.pop();
+      const x = p % W, y = (p / W) | 0;
+      area++; if (st[p]) raw++;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      for (const q of [p - 1, p + 1, p - W, p + W]) if (q >= 0 && q < N && d2[q] && label[q] < 0) { label[q] = id; stack.push(q); }
+    }
+    comps.push({ x0, y0, x1, y1, area, raw });
+  }
+  const good = comps.filter((c) => c.raw >= 6);
+  if (!good.length) return { found: false, reason: '動かない物は見つかりませんでした。範囲を自分で指定することもできます。' };
+  // 画面の真ん中に近く、ある程度大きいものを選ぶ
+  const maxArea = Math.max(...good.map((c) => c.area));
+  const cand = good.filter((c) => c.area >= maxArea * 0.3);
+  cand.sort((a, b) => Math.hypot((a.x0 + a.x1) / 2 - W / 2, (a.y0 + a.y1) / 2 - H / 2) - Math.hypot((b.x0 + b.x1) / 2 - W / 2, (b.y0 + b.y1) / 2 - H / 2));
+  const c = cand[0];
+  const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
+  const fill = c.raw / (bw * bh);
+  const m = 0.12;   // 余白（にじみ・影の分）
+  onProgress?.(1);
+  const mask = {
+    shape: fill >= 0.55 ? 'rect' : 'ellipse',
+    cx: (c.x0 + c.x1 + 1) / 2 / W, cy: (c.y0 + c.y1 + 1) / 2 / H,
+    rw: Math.min(0.45, (bw / 2 / W) * (fill >= 0.55 ? 1 + m : 1.3)), rh: Math.min(0.45, (bh / 2 / H) * (fill >= 0.55 ? 1 + m : 1.3)),
+  };
+  return { found: true, mask, pairs };
 }

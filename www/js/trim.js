@@ -1,6 +1,8 @@
 // 書き出し範囲（トリミング）：四角形／丸 × 外接／内接／自由
 // 範囲はモザイク座標の {x, y, w, h}（丸の場合は w = h の正方形に内接する円）
 
+import { fillTileCells } from './mask.js';
+
 // 覆われているかどうかのグリッド（セル中心でサンプル）
 function coverGrid(mosaic, maxCells = 360) {
   const bb = mosaic.bbox();
@@ -8,14 +10,8 @@ function coverGrid(mosaic, maxCells = 360) {
   const cell = Math.max(bb.w, bb.h) / maxCells;
   const gw = Math.max(1, Math.ceil(bb.w / cell)), gh = Math.max(1, Math.ceil(bb.h / cell));
   const g = new Uint8Array(gw * gh);
-  // タイルの矩形を塗る（セル中心が入るものだけ）
-  for (const t of mosaic.placed()) {
-    const i0 = Math.max(0, Math.ceil((t.x - bb.x) / cell - 0.5));
-    const i1 = Math.min(gw - 1, Math.floor((t.x + t.w - bb.x) / cell - 0.5));
-    const j0 = Math.max(0, Math.ceil((t.y - bb.y) / cell - 0.5));
-    const j1 = Math.min(gh - 1, Math.floor((t.y + t.h - bb.y) / cell - 0.5));
-    for (let j = j0; j <= j1; j++) g.fill(1, j * gw + i0, j * gw + i1 + 1);
-  }
+  // タイルを塗る（記録しない領域の中は塗らない）
+  for (const t of mosaic.placed()) fillTileCells(g, gw, gh, bb.x, bb.y, cell, t);
   return { g, gw, gh, cell, bb };
 }
 

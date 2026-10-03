@@ -84,26 +84,15 @@ await page.evaluate(() => { window.largepic.mosaic.clear(); });
 const A = []; for (let k = 0; k < 40; k++) A.push([500 + k * 20, 600]);
 const Brev = [...A].reverse();
 await importVideo(await makeVideo('vidH1', A));
-// 取り込み済みの画像の一部を消して、小さな抜け（穴）を作る
+// 取り込み済みのある地点を覆うすべてのタイルに、同じ場所の 60×40 の小さな穴（記録しない領域）をあけて、未取得の穴を作る
 const hole = await page.evaluate(() => {
   const { mosaic } = window.largepic;
   const bb = mosaic.bbox();
-  for (let tries = 0; tries < 400; tries++) {
-    // 画像の端から十分内側で、毎回同じ順序で探す（端だと範囲の外側の未取得が混ざるため）
-    const px = bb.x + 120 + ((tries * 0.6180339) % 1) * (bb.w - 240), py = bb.y + 120 + ((tries * 0.7548776) % 1) * (bb.h - 240);
-    const cover = mosaic.tiles.filter((t) => px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h);
-    if (cover.length < 2) continue;
-    // これらを消したあとの、点まわり 160×160 の未取得面積
-    const keep = mosaic.tiles.filter((t) => !cover.includes(t));
-    const saved = mosaic.tiles; mosaic.tiles = keep;
-    const u = mosaic.uncoveredArea(px - 80, py - 80, 160, 160);
-    mosaic.tiles = saved;
-    if (u.area > 600 && u.area < 9000) {
-      for (const t of cover) mosaic.remove(t);
-      return { px, py, before: mosaic.uncoveredArea(px - 80, py - 80, 160, 160).area, removed: cover.length, n: mosaic.tiles.length };
-    }
-  }
-  return null;
+  const px = bb.x + bb.w * 0.5, py = bb.y + bb.h * 0.5;
+  const cover = mosaic.tiles.filter((t) => px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h);
+  if (!cover.length) return null;
+  for (const t of cover) t.mask = { shape: 'rect', cx: px - t.x, cy: py - t.y, rx: 30, ry: 20, x: px - t.x - 30, y: py - t.y - 20, w: 60, h: 40 };
+  return { px, py, before: mosaic.uncoveredArea(px - 80, py - 80, 160, 160).area, removed: 0, n: mosaic.tiles.length, tiles: cover.length };
 });
 console.log('hole', JSON.stringify(hole));
 check(!!hole, '小さな抜けを作れた');

@@ -112,6 +112,16 @@
     <label>終了 <output data-end-out></output><input type="range" data-end></label>
     <small>録画の最初や最後に、地図以外（このアプリやホーム画面）が映っている部分を外してください。</small>
   </div>
+  <div class="maskbox">
+    <label class="check"><input type="checkbox" id="maskOn"> 動かない物（ポインター・キャラクターなど）を記録しない</label>
+    <div id="maskCtl" hidden>
+      <div class="row">
+        <div class="seg" id="maskShape"><button data-v="ellipse" class="on">◯ 丸</button><button data-v="rect">▭ 四角</button></div>
+        <button id="maskDetect" hidden>自動で見つける</button>
+      </div>
+      <small id="maskMsg">赤い範囲をドラッグで動かし、右下の●で大きさを変えます。この範囲は記録せず、画面が動いたあとの絵で埋めます。</small>
+    </div>
+  </div>
   <div class="row">
     <button data-preset="phone">スマホ地図向け</button>
     <button data-preset="desktop">PC向け</button>
@@ -264,6 +274,7 @@
 
   <h3>取り込む範囲（最初に聞かれます）</h3>
   <ul class="help">
+    <li><b>画面の真ん中のポインターやキャラクター</b>のように、地図が動いても同じ位置に居続ける物は、<b>「動かない物を記録しない」</b>にチェックして範囲を指定すると、その部分は記録されません（動画なら［自動で見つける］も使えます）。隠れていた所は、画面が動いたあとの絵で埋まります。そのぶんコマを細かく取り込みます。
     <li>検索バー・ボタン・タブバーなど、<b>動かない部分は青い枠の外</b>へ。これが入るとつながりません。</li>
     <li>動画の場合は、<b>開始・終了</b>のスライダーで地図以外が映っている部分を外せます。</li>
   </ul>

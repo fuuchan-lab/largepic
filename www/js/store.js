@@ -2,6 +2,7 @@
 // 撮影のために他のアプリへ切り替えている間にページが閉じられても、続きから再開できる
 import { decodeCrop, decodeBitmap, grayOf, makeThumb, isBlank, newCanvas, canvasToBlob } from './imageutil.js';
 import { makeFeatures, scalesFor } from './register.js';
+import { flattenGray } from './mask.js';
 
 const DB = 'largepic';
 let dbp = null;
@@ -62,7 +63,7 @@ export class ProjectStore {
     const meta = {
       version: 1,
       nextId: this.mosaic.nextId,
-      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0 })),
+      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0, mask: t.mask || null })),
     };
     const add = tiles.filter((t) => !this.saved.has(t.id));
     const del = [...this.saved].filter((id) => !ids.has(id));
@@ -127,6 +128,7 @@ export class ProjectStore {
         c.width = c.height = 0;
       }
       const gray = grayOf(bmp);
+      if (m.mask) flattenGray(gray, m.w, m.h, m.mask);   // 透明にした部分は、位置合わせ用にはならしておく
       const { bmp: thumb, scale } = await makeThumb(bmp, m.w, m.h, stitcher.settings.thumbSize);
       bmp.close?.();
       const feat = makeFeatures(gray, m.w, m.h, stitcher.scales);
