@@ -285,6 +285,29 @@
   <div class="row end"><button id="warnOk" class="primary">OK</button></div>
 </dialog>
 
+<dialog id="dlgConflict">
+  <h2>絵が食い違ったので止めました</h2>
+  <p id="cfBody" class="sub"></p>
+  <div class="col">
+    <button id="cfUndo3" class="primary">直前の3枚を取り消して終了</button>
+    <button id="cfUndoAll">この取り込み分をすべて取り消して終了</button>
+    <button id="cfKeep">ここまでを残して終了</button>
+    <button id="cfIgnore">無視して続ける</button>
+  </div>
+  <p class="sub small">あとから［↶ 戻す］で、1枚ずつ・5枚ずつ・取り込み単位で取り消せます。</p>
+</dialog>
+
+<dialog id="dlgUndo">
+  <h2>取り消し</h2>
+  <p id="undoInfo" class="sub"></p>
+  <div class="col">
+    <button id="undo1">最後の1枚を取り消す</button>
+    <button id="undo5">最後の5枚を取り消す</button>
+    <button id="undoBatch">直近の取り込み（<span id="undoBatchN">0</span>枚）をすべて取り消す</button>
+  </div>
+  <div class="row end"><button data-close>閉じる</button></div>
+</dialog>
+
 <dialog id="dlgRestore">
   <h2>前回の続き</h2>
   <p class="sub">前回の作業が保存されています。続きから再開しますか？</p>

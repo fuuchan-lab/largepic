@@ -17,6 +17,7 @@ const DEFAULTS = {
   threshold: 0.55,
   videoStep: 0.15,
   addUncovered: 0.2,
+  conflictBelow: 0.45,   // 重なる部分の相関がこれ未満なら「絵が食い違う」とみなす
   thumbSize: 640,
   bgColor: 'black',
   crops: { image: PRESETS.phone, video: PRESETS.phone, live: PRESETS.desktop },
@@ -133,6 +134,31 @@ function showTransformWarning(r, where, extra) {
   if (!dlg.open) dlg.showModal();
 }
 
+// 絵の食い違い（矛盾）を見つけて止めたとき。選んだ操作をして 'stop' か 'continue' を返す
+function resolveConflict(r, where, batch) {
+  return new Promise((resolve) => {
+    const dlg = $('#dlgConflict');
+    const mine = mosaic.batchTiles(batch).length;
+    $('#cfBody').textContent = `${where}で、すでに取り込んだ部分と絵が食い違いました（重なる部分の一致度 ${Math.round(Math.max(0, r.score) * 100)}%）。`
+      + 'このまま続けると、ずれが広がるおそれがあります。';
+    $('#cfUndo3').disabled = mine < 1;
+    $('#cfUndoAll').disabled = mine < 1;
+    $('#cfUndoAll').textContent = `この取り込み分（${mine}枚）をすべて取り消して終了`;
+    const done = (act) => {
+      for (const id of ['cfUndo3', 'cfUndoAll', 'cfKeep', 'cfIgnore']) $('#' + id).onclick = null;
+      dlg.oncancel = null;
+      dlg.close();
+      resolve(act);
+    };
+    $('#cfUndo3').onclick = () => { const n = mosaic.removeLast(Math.min(3, mine)); toast(`直前の${n}枚を取り消しました`); done('stop'); };
+    $('#cfUndoAll').onclick = () => { for (const t of mosaic.batchTiles(batch)) mosaic.remove(t); toast('この取り込み分を取り消しました'); done('stop'); };
+    $('#cfKeep').onclick = () => done('stop');
+    $('#cfIgnore').onclick = () => done('continue');
+    dlg.oncancel = (e) => { e.preventDefault(); };
+    dlg.showModal();
+  });
+}
+
 async function askCrop(kind, source, sw, sh, opts) {
   const r = await editCrop($('#dlgCrop'), source, sw, sh, settings.crops[kind], opts);
   if (!r) return null;
@@ -145,6 +171,7 @@ async function askCrop(kind, source, sw, sh, opts) {
 async function addImages(files) {
   if (!files.length || busy) return;
   setBusy(true);
+  mosaic.newBatch();
   files = [...files].sort((a, b) => (a.lastModified - b.lastModified) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   const counts = { placed: 0, unplaced: 0, first: 0 };
   try {
@@ -210,6 +237,7 @@ async function addVideo(file) {
   const video = $('#video');
   const url = URL.createObjectURL(file);
   const wasEmpty = !mosaic.tiles.length;
+  const batch = mosaic.newBatch();
   try {
     video.src = url;
     video.load();
@@ -229,6 +257,7 @@ async function addVideo(file) {
 
     // 1) 事前解析：縮小した画像でスクロールの経路をたどり、取り込むコマ（キーフレーム）だけを選ぶ
     let keys = null;
+    let fallbackWhy = '';
     try {
       if (settings.fullScan) throw new Error('全コマ方式（設定）');
       prog.set(0, '動画を解析しています…');
@@ -244,6 +273,7 @@ async function addVideo(file) {
       }
     } catch (err) {
       console.warn('解析に失敗。全コマ方式に切り替えます', err);
+      fallbackWhy = settings.fullScan ? '' : '（解析に失敗したため全コマ方式）';
     }
 
     if (keys) {
@@ -256,6 +286,10 @@ async function addVideo(file) {
         const hint = pk && !k.newSeg ? { dx: k.x - pk.x, dy: k.y - pk.y } : undefined;
         const r = await tracker.process(frame, { hint, kpos: { x: k.x, y: k.y }, vt: k.t, newSeg: k.newSeg, key: true, final: i === keys.length - 1 });
         if (r.state === 'transform') { stopped = { r, t: k.t }; break; }
+        if (r.state === 'conflict') {
+          const act = await resolveConflict(r, `動画の ${(k.t - start).toFixed(1)} 秒付近`, batch);
+          if (act === 'continue') { tracker.ignoreConflicts = 4; } else { stopped = { conflict: true }; break; }
+        }
         if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
         liveRect = r.rect; liveLost = r.state === 'lost';
         const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
@@ -276,12 +310,16 @@ async function addVideo(file) {
         const frame = grabFrame(video, video.videoWidth, video.videoHeight, crop);
         const r = await tracker.process(frame, { final: i === times.length - 1 });
         if (r.state === 'transform') { stopped = { r, t }; break; }
+        if (r.state === 'conflict') {
+          const act = await resolveConflict(r, `動画の ${(t - start).toFixed(1)} 秒付近`, batch);
+          if (act === 'continue') { tracker.ignoreConflicts = 4; } else { stopped = { conflict: true }; break; }
+        }
         if (r.state === 'added' && !fitted) { view.fit(); fitted = true; }
         liveRect = r.rect; liveLost = r.state === 'lost';
         const msg = r.state === 'waiting' ? ' ・ スクロールの始まりを探しています…'
           : liveLost ? ' ・ 位置を探しています（取り込み済みの場所が映るまで待機）' : '';
         prog.set((t - start) / Math.max(0.01, end - start),
-          `${(t - start).toFixed(1)} / ${(end - start).toFixed(1)} 秒 ・ 取り込み ${tracker.stats.added}枚${msg}`);
+          `${(t - start).toFixed(1)} / ${(end - start).toFixed(1)} 秒 ・ 取り込み ${tracker.stats.added}枚${msg}${fallbackWhy}`);
         await nextFrame();
       }
     }
@@ -289,7 +327,9 @@ async function addVideo(file) {
     view.fit();
     const { added, lost } = tracker.stats;
     console.log('解析結果 取り込み統計', JSON.stringify(tracker.stats));
-    if (stopped) {
+    if (stopped?.conflict) {
+      toast('矛盾が見つかったので取り込みを止めました。［↶ 戻す］でさらに取り消せます', 6000);
+    } else if (stopped) {
       pendingWarn = [stopped.r, `動画の ${(stopped.t - start).toFixed(1)} 秒付近`,
         added ? `ここまでの${added}枚は取り込み済みです。` : ''];
     } else if (!wasEmpty && added === 0) {
@@ -429,6 +469,7 @@ async function startLive() {
   const sel = await askCrop('live', video, video.videoWidth, video.videoHeight);
   if (!sel) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; return; }
   setBusy(true);
+  live.batch = mosaic.newBatch();
   Object.assign(live, { stream, running: true, paused: false, tracker: new Tracker(stitcher), crop: sel.crop });
   stream.getVideoTracks()[0].addEventListener('ended', stopLive);
   $('#livebar').hidden = false;
@@ -453,6 +494,15 @@ async function liveLoop() {
           $('#btnLivePause').textContent = '再開';
           setLiveState('lost', '停止中：地図が回転 / 拡大率が変わりました');
           showTransformWarning(r, 'ライブ取り込み中', 'ここで取り込みを一時停止しました（［再開］で続けられます）。');
+          continue;
+        }
+        if (r.state === 'conflict') {
+          live.paused = true;
+          $('#btnLivePause').textContent = '再開';
+          setLiveState('lost', '停止中：絵が食い違いました');
+          const act = await resolveConflict(r, 'ライブ取り込み中', live.batch);
+          if (act === 'continue') { live.tracker.ignoreConflicts = 4; live.paused = false; $('#btnLivePause').textContent = '一時停止'; live.tracker.lost = true; }
+          else { stopLive(); }
           continue;
         }
         liveRect = r.rect; liveLost = r.state === 'lost';
@@ -592,10 +642,22 @@ $('#fileVideo').onchange = (e) => { const f = e.target.files[0]; e.target.value 
 $('#btnFit').onclick = () => view.fit();
 $('#btnUndo').onclick = () => {
   if (busy || !mosaic.tiles.length) return;
-  const last = mosaic.tiles.reduce((a, b) => (b.id > a.id ? b : a));
-  if (view.selected === last) view.selected = null;
-  mosaic.remove(last);
-  toast('最後の1枚を取り消しました');
+  const last = mosaic.tiles.reduce((x, y) => (y.id > x.id ? y : x));
+  const n = mosaic.batchTiles(last.batch).length;
+  $('#undoInfo').textContent = `全部で${mosaic.tiles.length}枚。直近の取り込みは${n}枚です。`;
+  $('#undoBatchN').textContent = n;
+  $('#undo5').disabled = mosaic.tiles.length < 2;
+  $('#undoBatch').disabled = n < 1;
+  $('#dlgUndo').showModal();
+};
+const undoDone = (msg) => { view.selected = null; $('#dlgUndo').close(); toast(msg); };
+$('#undo1').onclick = () => { const n = mosaic.removeLast(1); undoDone(`${n}枚を取り消しました`); };
+$('#undo5').onclick = () => { const n = mosaic.removeLast(5); undoDone(`${n}枚を取り消しました`); };
+$('#undoBatch').onclick = () => {
+  const last = mosaic.tiles.reduce((x, y) => (y.id > x.id ? y : x));
+  const list = mosaic.batchTiles(last.batch);
+  for (const t of list) mosaic.remove(t);
+  undoDone(`直近の取り込み（${list.length}枚）を取り消しました`);
 };
 $('#btnHelp').onclick = () => $('#dlgHelp').showModal();
 document.querySelectorAll('dialog [data-close]').forEach((b) => { b.onclick = () => b.closest('dialog').close(); });

@@ -71,6 +71,26 @@ export class Stitcher {
       .map((o) => o.t);
   }
 
+  // 位置 (x,y) に置くと、重なる既存タイルと絵が食い違う（矛盾する）か調べる。
+  // 重なり部分に十分な模様があるのに相関が低いときだけ矛盾とみなす（無地の海などでは判断しない）。
+  conflictAt(feat, x, y) {
+    const rect = { x, y, w: feat.w, h: feat.h };
+    const list = this.mosaic.placed()
+      .map((t) => ({ t, a: overlapArea(rect, t) }))
+      .filter((o) => o.a > 0.12 * feat.w * feat.h)
+      .sort((p, q) => q.a - p.a)
+      .slice(0, 4);
+    let worst = null;
+    for (const { t } of list) {
+      const k = t.feat.mid.scale;
+      const r = ncc(t.feat.mid, feat.mid, Math.round((x - t.x) * k), Math.round((y - t.y) * k), 1);
+      if (r.overlap >= 0.12 && r.texture >= 12 && r.raw < this.settings.conflictBelow) {
+        if (!worst || r.raw < worst.score) worst = { score: r.raw, tile: t };
+      }
+    }
+    return worst;
+  }
+
   // 位置 (x,y) 付近で、重なっている既存タイルとの位置合わせを詰める
   async refineAt(feat, x, y, radius, exclude = null) {
     const rect = { x, y, w: feat.w, h: feat.h };
@@ -152,6 +172,7 @@ export class Tracker {
     this.lost = true;
     this.stats = { added: 0, lost: 0, frames: 0 };
     this.posHistory = [];  // 位置履歴（整合性チェック用）
+    this.ignoreConflicts = 0;
     this.tf = { hits: 0, last: null, lostFrames: 0 };  // 回転・拡大率の変化の検出状況
   }
 
@@ -310,6 +331,12 @@ export class Tracker {
       this.posHistory.push({ ...this.pos });
       if (this.posHistory.length > 10) this.posHistory.shift();  // 履歴は最大10フレーム保持
 
+      // 既存の部分と絵が食い違うなら、取り込まずに知らせる（そのまま続けるとずれが広がる）
+      if (this.ignoreConflicts > 0) this.ignoreConflicts--;
+      else {
+        const bad = st.conflictAt(feat, this.pos.x, this.pos.y);
+        if (bad) return { state: 'conflict', rect: rectAt(this.pos), score: bad.score };
+      }
       const tile = await st.makeTile(frame, feat, null, this.pos.x, this.pos.y, true);
       tile.conf = conf;
       tile.vt = opts.vt;  // 動画の時刻（デバッグ用）

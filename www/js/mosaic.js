@@ -22,8 +22,21 @@ export class Mosaic {
   onChange(fn) { this.listeners.add(fn); }
   changed(kind = 'tiles') { for (const fn of this.listeners) fn(kind); }
 
+  // 取り込み単位（動画1本・画像まとめて1回など）。あとから単位で取り消せるように印を付ける
+  newBatch() { this.batch = (this.batchSeq = (this.batchSeq || 0) + 1); return this.batch; }
+
+  batchTiles(b) { return this.tiles.filter((t) => t.batch === b); }
+
+  // 新しい順に n 枚を取り消す
+  removeLast(n) {
+    const list = [...this.tiles].sort((a, b) => b.id - a.id).slice(0, n);
+    for (const t of list) this.remove(t);
+    return list.length;
+  }
+
   add(tile) {
     tile.id = this.nextId++;
+    if (tile.batch == null) tile.batch = this.batch ?? 0;
     this.tiles.push(tile);
     this.changed();
     return tile;

@@ -62,7 +62,7 @@ export class ProjectStore {
     const meta = {
       version: 1,
       nextId: this.mosaic.nextId,
-      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf })),
+      tiles: tiles.map((t) => ({ id: t.id, x: t.x, y: t.y, w: t.w, h: t.h, placed: t.placed, sx: t.sx, sy: t.sy, weak: !!t.weak, conf: t.conf, batch: t.batch ?? 0 })),
     };
     const add = tiles.filter((t) => !this.saved.has(t.id));
     const del = [...this.saved].filter((id) => !ids.has(id));
@@ -136,6 +136,7 @@ export class ProjectStore {
       if (bad) this.mosaic.warn?.('一部の画像を高解像度で読み込めませんでした');
       onProgress?.(++n / meta.tiles.length);
     }
+    this.mosaic.batchSeq = Math.max(0, ...this.mosaic.tiles.map((x) => x.batch || 0));
     this.mosaic.nextId = Math.max(meta.nextId || 1, ...this.mosaic.tiles.map((x) => x.id + 1));
     this.mosaic.changed();
     return n;

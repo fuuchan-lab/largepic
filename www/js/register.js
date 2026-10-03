@@ -157,7 +157,7 @@ export function ncc(A, B, dx, dy, stride = 1) {
   }
   const overlap = ((x1 - x0) * (y1 - y0)) / Math.min(A.w * A.h, B.w * B.h);
   const va = saa - sa * sa / n, vb = sbb - sb * sb / n;
-  if (va <= 1e-6 * n || vb <= 1e-6 * n) return { score: 0, overlap };
+  if (va <= 1e-6 * n || vb <= 1e-6 * n) return { score: 0, overlap, raw: 0, texture: 0 };
 
   // 平坦性チェック改善：エッジ密度を考慮
   let flatScore = Math.min(1, Math.sqrt(Math.min(va, vb) / n) / 2.5);
@@ -165,7 +165,9 @@ export function ncc(A, B, dx, dy, stride = 1) {
   const edgeB = computeEdgeDensity(b, B.w, B.h, x0 - dx, y0 - dy, x1 - dx, y1 - dy, stride);
   if (edgeA > 0.05 || edgeB > 0.05) flatScore = Math.min(1, flatScore + 0.3);
 
-  return { score: ((sab - sa * sb / n) / Math.sqrt(va * vb)) * flatScore, overlap };
+  const raw = (sab - sa * sb / n) / Math.sqrt(va * vb);
+  // raw: 平坦さの補正をしない純粋な相関 ／ texture: 重なり部分の模様の強さ（標準偏差）
+  return { score: raw * flatScore, overlap, raw, texture: Math.sqrt(Math.min(va, vb) / n) };
 }
 
 function strideFor(area) {
