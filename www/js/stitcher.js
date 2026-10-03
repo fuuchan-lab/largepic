@@ -234,7 +234,7 @@ export class Tracker {
       motion = Infinity;
     }
 
-    const unc = this.mosaic.uncoveredFraction(this.pos.x, this.pos.y, frame.w, frame.h);
+    const { frac: unc, area: uncArea } = this.mosaic.uncoveredArea(this.pos.x, this.pos.y, frame.w, frame.h);
     const small = Math.min(frame.w, frame.h);
     const still = motion <= Math.max(2, small * 0.015);
     const fast = motion > small * 0.08;
@@ -244,7 +244,9 @@ export class Tracker {
     else if (opts.key) need = Math.min(need, 0.12);  // 事前解析で選んだコマ：新しい範囲が少しでもあれば取り込む
     else if (still) need = Math.min(0.02, need);
     else if (fast) need = Math.max(need, 0.45);
-    if (unc > need) {
+    // 小さな抜け（穴）も埋める：止まったコマ・選んだコマでは、割合が小さくても一定の面積があれば取り込む
+    const hole = (opts.final || opts.key || still) && uncArea >= frame.w * frame.h * 0.001;
+    if (unc > need || hole) {
       // 既存タイルと直接合わせ直して誤差の蓄積を防ぐ
       const fix = await st.refineAt(feat, this.pos.x, this.pos.y, 24);
       if (fix) this.pos = { x: fix.x, y: fix.y };

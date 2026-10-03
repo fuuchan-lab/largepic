@@ -88,6 +88,24 @@ export class Mosaic {
   }
 
   // 矩形のうち、まだどのタイルにも覆われていない割合
+  // 矩形のうち、どのタイルにも覆われていない面積（px²）と割合。
+  // 小さな抜け（穴）も見落とさないよう、細かい格子で数える。
+  uncoveredArea(x, y, w, h) {
+    const c = Math.max(3, Math.round(Math.min(w, h) / 160));
+    const gw = Math.ceil(w / c), gh = Math.ceil(h / c);
+    const g = new Uint8Array(gw * gh);
+    for (const t of this.tiles) {
+      if (!t.placed || t.x >= x + w || t.y >= y + h || t.x + t.w <= x || t.y + t.h <= y) continue;
+      const i0 = Math.max(0, Math.ceil((t.x - x) / c - 0.5)), i1 = Math.min(gw - 1, Math.floor((t.x + t.w - x) / c - 0.5));
+      const j0 = Math.max(0, Math.ceil((t.y - y) / c - 0.5)), j1 = Math.min(gh - 1, Math.floor((t.y + t.h - y) / c - 0.5));
+      for (let j = j0; j <= j1; j++) g.fill(1, j * gw + i0, j * gw + i1 + 1);
+    }
+    let miss = 0;
+    for (let k = 0; k < g.length; k++) if (!g[k]) miss++;
+    const area = miss * c * c;
+    return { area, frac: miss / g.length };
+  }
+
   uncoveredFraction(x, y, w, h) {
     const n = 12;
     let miss = 0;
