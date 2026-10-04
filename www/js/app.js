@@ -18,7 +18,7 @@ import { isNative, nativePlatform, webPlatform, ScreenRecorder, nativeFileToBlob
 
 const $ = (s) => document.querySelector(s);
 const APP = 'largepic';
-const APP_VERSION = '2026-10-03.13';  // 画面で確認できる版番号（設定の下）
+const APP_VERSION = '2026-10-04.1';  // 画面で確認できる版番号（設定の下）
 
 // ---------- 設定 ----------
 const DEFAULTS = {
@@ -493,12 +493,22 @@ function openCapture(fill = false) {
   const key = isNative ? 'native-' + nativePlatform : webPlatform;
   $('#capTitle').textContent = fill ? '不足部分を動画で追加' : '動画を取り込む';
   $('#capFill').hidden = !fill;
+  $('#capNew').hidden = !mosaic.tiles.length;   // 画像があるときは、新しく作り直す選択肢も出す
   $('#capSteps').innerHTML = (STEPS[key] || STEPS.desktop).map((s) => `<li>${s}</li>`).join('');
   $('#capStart').hidden = !(isNative && ScreenRecorder);
   $('#capLive').hidden = !canLive;
   $('#dlgCapture').showModal();
 }
 $('#btnFill').onclick = () => openCapture(true);
+$('#capNew').onclick = async () => {
+  if (!confirm('今の画像（' + mosaic.tiles.length + '枚）を消して、新しい画像を作ります。\n残したい場合は先に［画像を保存］してください。よろしいですか？')) return;
+  mosaic.clear();
+  await store.clear();
+  view.selected = null;
+  view.fit();
+  $('#dlgCapture').close();
+  openCapture(false);
+};
 $('#capPick').onclick = () => { $('#dlgCapture').close(); $('#fileVideo').click(); };
 $('#capLive').onclick = () => { $('#dlgCapture').close(); startLive(); };
 $('#capStart').onclick = startNativeRecording;
